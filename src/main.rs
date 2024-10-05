@@ -14,6 +14,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 /// Holds the results of the sequence analysis.
+#[derive(Default)]
 struct AnalysisResults {
     /// Names of the analyzed FASTA files.
     filename: String,
@@ -27,19 +28,17 @@ struct AnalysisResults {
     n_count: usize,
     /// N25 statistic (length at 25% of total sequence length).
     n25: usize,
-    n25_secuence_count: usize,
+    n25_sequence_count: usize,
     /// N50 statistic (length at 50% of total sequence length).
     n50: usize,
-    n50_secuence_count: usize,
+    n50_sequence_count: usize,
     /// N75 statistic (length at 75% of total sequence length).
     n75: usize,
-    n75_secuence_count: usize,
+    n75_sequence_count: usize,
     /// Length of the largest contig (sequence).
     largest_contig: usize,
     /// Length of the shortest contig (sequence).
     shortest_contig: usize,
-    // Histogram of sequence lengths.
-    //length_histogram: HashMap<usize, usize>,
 }
 
 fn main() -> io::Result<()> {
@@ -49,44 +48,18 @@ fn main() -> io::Result<()> {
         std::process::exit(1);
     }
 
-    let mut csv_filename = None;
-    let mut fasta_file = String::new();
-
-    // Parse command line arguments
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-c" | "--csv" => {
-                if i + 1 < args.len() {
-                    csv_filename = Some(args[i + 1].clone());
-                    i += 2;
-                }
-            }
-            _ => {
-                if fasta_file.is_empty() && args[i].parse::<usize>().is_ok() {
-                    eprintln!("Error: Specify fasta");
-                    std::process::exit(1);
-                } else {
-                    fasta_file = args[i].to_string();
-                }
-                i += 1;
-            }
-        }
-    }
+    let (csv_filename, fasta_file) = parse_args(&args);
 
     let file = File::open(&fasta_file)?;
-    let buf_reader: BufReader<File> = BufReader::new(file);
+    let buf_reader = BufReader::new(file);
     let fasta_reader = fasta::Reader::new(buf_reader);
 
-    let mut results = AnalysisResults::new();
-    results.filename = fasta_file;
-
-    let mut lengths: Vec<usize> = Vec::new();
+    let mut results = AnalysisResults::new(fasta_file);
+    let mut lengths = Vec::new();
 
     for result in fasta_reader.records() {
         let record = result.expect("Error reading record");
-        let seq: std::borrow::Cow<'_, str> = String::from_utf8_lossy(record.seq());
-        process_secuence(seq, &mut results, &mut lengths);
+        process_sequence(record.seq(), &mut results, &mut lengths);
     }
 
     calc_nq_stats(&mut lengths, &mut results);
@@ -110,28 +83,27 @@ fn main() -> io::Result<()> {
 ///
 /// An `AnalysisResults` struct containing the computed statistics.
 ///```
-/// fn process_secuence(
+/// fn process_sequence(
 ///    sequence: std::borrow::Cow<'_, str>,
 ///    results: &mut AnalysisResults,
 ///    lengths: &mut Vec<usize>,
 /// ) {
-/// 
+///
 /// ```
-/// El cow permite copias sin muchas allocations
-/// 
-fn process_secuence(
-    sequence: std::borrow::Cow<'_, str>,
-    results: &mut AnalysisResults,
-    lengths: &mut Vec<usize>,
-) {
+///
+
+fn process_sequence(sequence: &[u8], results: &mut AnalysisResults, lengths: &mut Vec<usize>) {
     let length = sequence.len();
     results.sequence_count += 1;
     results.total_length += length;
     results.gc_count += sequence
-        .chars()
-        .filter(|&c| c == 'G' || c == 'C' || c == 'g' || c == 'c')
+        .iter()
+        .filter(|&&c| matches!(c, b'G' | b'C' | b'g' | b'c'))
         .count();
-    results.n_count += sequence.chars().filter(|&c| c == 'N' || c == 'n').count();
+    results.n_count += sequence
+        .iter()
+        .filter(|&&c| matches!(c, b'N' | b'n'))
+        .count();
 
     results.largest_contig = results.largest_contig.max(length);
     results.shortest_contig = results.shortest_contig.min(length);
@@ -145,24 +117,27 @@ fn process_secuence(
 ///
 /// * `results` - The `AnalysisResults` struct containing the analysis results
 /// * `interval_size` - The interval size used for the length histogram
-fn calc_nq_stats(lengths: &mut Vec<usize>, results: &mut AnalysisResults) {
+fn calc_nq_stats(lengths: &mut [usize], results: &mut AnalysisResults) {
     lengths.sort_unstable_by(|a, b| b.cmp(a)); // Sort in descending order
+    let total_length = results.total_length;
     let mut cumulative_length = 0;
-    let mut cumulative_secuences = 0;
-    for length in lengths {
-        cumulative_length += *length;
-        cumulative_secuences += 1;
-        if results.n25 == 0 && cumulative_length >= results.total_length * 1 / 4 {
-            results.n25 = *length;
-            results.n25_secuence_count = cumulative_secuences;
+    let mut cumulative_sequences = 0;
+
+    for &mut length in lengths {
+        cumulative_length += length;
+        cumulative_sequences += 1;
+        
+        if results.n25 == 0 && cumulative_length >= total_length / 4 {
+            results.n25 = length;
+            results.n25_sequence_count = cumulative_sequences;
         }
-        if results.n50 == 0 && cumulative_length >= results.total_length * 1 / 2 {
-            results.n50 = *length;
-            results.n50_secuence_count = cumulative_secuences;
+        if results.n50 == 0 && cumulative_length >= total_length / 2 {
+            results.n50 = length;
+            results.n50_sequence_count = cumulative_sequences;
         }
-        if results.n75 == 0 && cumulative_length >= results.total_length * 3 / 4 {
-            results.n75 = *length;
-            results.n75_secuence_count = cumulative_secuences;
+        if results.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
+            results.n75 = length;
+            results.n75_sequence_count = cumulative_sequences;
             break;
         }
     }
@@ -177,8 +152,6 @@ fn calc_nq_stats(lengths: &mut Vec<usize>, results: &mut AnalysisResults) {
 //fn print_results(results: &AnalysisResults) {
 fn print_results(results: &AnalysisResults) {
     let mut stdout = BufWriter::new(stdout());
-    //println!("\nAnalysis Results for: {}", results.filenames.join(", "));
-
     writeln!(
         &mut stdout,
         "\nTotal length of sequence:\t{} bp",
@@ -212,19 +185,19 @@ fn print_results(results: &AnalysisResults) {
     writeln!(
         &mut stdout,
         "N25 stats:\t\t\t25% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n25_secuence_count, results.n25
+        results.n25_sequence_count, results.n25
     )
     .unwrap();
     writeln!(
         &mut stdout,
         "N50 stats:\t\t\t50% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n50_secuence_count, results.n50
+        results.n50_sequence_count, results.n50
     )
     .unwrap();
     writeln!(
         &mut stdout,
         "N75 stats:\t\t\t75% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n75_secuence_count, results.n75
+        results.n75_sequence_count, results.n75
     )
     .unwrap();
     writeln!(&mut stdout, "Total GC count:\t\t\t{} bp", results.gc_count).unwrap();
@@ -242,19 +215,6 @@ fn print_results(results: &AnalysisResults) {
     )
     .unwrap();
     stdout.flush().unwrap();
-
-    //println!("\nLength histogram:");
-    //let mut intervals: Vec<_> = results.length_histogram.keys().collect();
-    //intervals.sort_unstable();
-    //for &interval in intervals {
-    //    let count = results.length_histogram[&interval];
-    //println!(
-    //"{}:{}\t{}",
-    //        interval * interval_size,
-    //        (interval + 1) * interval_size - 1,
-    //        count
-    //    );
-    //}
 }
 
 /// Appends the analysis results to a CSV file.
@@ -272,7 +232,7 @@ fn print_results(results: &AnalysisResults) {
 /// An `io::Result<()>` indicating success or containing an error if the operation failed.
 fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()> {
     let file_exists = Path::new(csv_filename).exists();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .append(true)
         .create(true)
@@ -282,47 +242,87 @@ fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()
     let fd = file.as_raw_fd();
     unsafe { libc::flock(fd, libc::LOCK_EX) }; // Acquire exclusive lock
 
+    
+    let mut csv_writer = CsvWriter::new(BufWriter::new(file));
+
     if !file_exists {
-        // Write header if the file is newly created
-        writeln!(file, "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage")?;
+        csv_writer.write_header()?;
     }
-    writeln!(
-        file,
-        "{:?};{};{};{};{};{};{};{};{};{}",
-        //results.filenames.join("+"),
-        Path::new(&results.filename).file_name().unwrap(),
-        results.total_length,
-        results.sequence_count,
-        results.total_length as f64 / results.sequence_count as f64,
-        results.largest_contig,
-        results.shortest_contig,
-        results.n50,
-        (results.gc_count as f64 / results.total_length as f64) * 100.0,
-        results.n_count,
-        (results.n_count as f64 / results.total_length as f64) * 100.0,
-    )?;
+    csv_writer.write_record(results)?;
 
     // Release the file lock
     unsafe { libc::flock(fd, libc::LOCK_UN) }; // Unlock the file
     Ok(())
 }
 
+fn parse_args(args: &[String]) -> (Option<String>, String) {
+    let mut csv_filename = None;
+    let mut fasta_file = String::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-c" | "--csv" if i + 1 < args.len() => {
+                csv_filename = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => {
+                if fasta_file.is_empty() {
+                    fasta_file = args[i].to_string();
+                }
+                i += 1;
+            }
+        }
+    }
+
+    (csv_filename, fasta_file)
+}
+
 impl AnalysisResults {
-    fn new() -> Self {
+    fn new(fasta_file: String) -> Self {
         AnalysisResults {
-            filename: String::new(), // Will be set later
+            filename: fasta_file,
             total_length: 0,
             sequence_count: 0,
             gc_count: 0,
             n_count: 0,
             n25: 0,
-            n25_secuence_count: 0,
+            n25_sequence_count: 0,
             n50: 0,
-            n50_secuence_count: 0,
+            n50_sequence_count: 0,
             n75: 0,
-            n75_secuence_count: 0,
+            n75_sequence_count: 0,
             largest_contig: 0,
             shortest_contig: usize::MAX,
         }
+    }
+}
+
+struct CsvWriter<W: Write> {
+    writer: W,
+}
+
+impl<W: Write> CsvWriter<W> {
+    fn new(writer: W) -> Self {
+        CsvWriter { writer }
+    }
+
+    fn write_header(&mut self) -> io::Result<()> {
+        self.writer.write_all(b"filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n")
+    }
+
+    fn write_record(&mut self, results: &AnalysisResults) -> io::Result<()> {
+        let filename = Path::new(&results.filename).file_name().unwrap().to_str().unwrap();
+        write!(self.writer, "{};", filename)?;
+        write!(self.writer, "{};", results.total_length)?;
+        write!(self.writer, "{};", results.sequence_count)?;
+        write!(self.writer, "{:.2};", results.total_length as f64 / results.sequence_count as f64)?;
+        write!(self.writer, "{};", results.largest_contig)?;
+        write!(self.writer, "{};", results.shortest_contig)?;
+        write!(self.writer, "{};", results.n50)?;
+        write!(self.writer, "{:.2};", (results.gc_count as f64 / results.total_length as f64) * 100.0)?;
+        write!(self.writer, "{};", results.n_count)?;
+        writeln!(self.writer, "{:.2}", (results.n_count as f64 / results.total_length as f64) * 100.0)?;
+        Ok(())
     }
 }
