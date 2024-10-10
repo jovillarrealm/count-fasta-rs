@@ -6,7 +6,7 @@
 //! appended to a CSV file for further analysis.
 
 //use std::collections::HashMap;
-use bio::io::fasta;
+use seq_io::fasta::Reader;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, stdout, BufReader, BufWriter, Write};
@@ -52,14 +52,18 @@ fn main() -> io::Result<()> {
 
     let file = File::open(&fasta_file)?;
     let buf_reader = BufReader::new(file);
-    let fasta_reader = fasta::Reader::new(buf_reader);
+    let mut fasta_reader = Reader::new(buf_reader);
 
-    let mut results = AnalysisResults::new(fasta_file);
-    let mut lengths = Vec::new();
+    let mut results = AnalysisResults {
+        filename: fasta_file,
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
+    let mut lengths = Vec::with_capacity(1000);
 
-    for result in fasta_reader.records() {
+    while let Some(result) = fasta_reader.next() {
         let record = result.expect("Error reading record");
-        process_sequence(record.seq(), &mut results, &mut lengths);
+        process_sequence(&record.full_seq(), &mut results, &mut lengths);
     }
 
     calc_nq_stats(&mut lengths, &mut results);
@@ -71,7 +75,6 @@ fn main() -> io::Result<()> {
     }
     Ok(())
 }
-
 /// Analyzes the given sequences and computes various statistics.
 ///
 /// # Arguments
@@ -96,15 +99,19 @@ fn process_sequence(sequence: &[u8], results: &mut AnalysisResults, lengths: &mu
     let length = sequence.len();
     results.sequence_count += 1;
     results.total_length += length;
-    results.gc_count += sequence
-        .iter()
-        .filter(|&&c| matches!(c, b'G' | b'C' | b'g' | b'c'))
-        .count();
-    results.n_count += sequence
-        .iter()
-        .filter(|&&c| matches!(c, b'N' | b'n'))
-        .count();
+    let mut gc_count = 0;
+    let mut n_count = 0;
 
+    for &c in sequence {
+        match c.to_ascii_uppercase() {
+            b'G' | b'C'  => gc_count += 1,
+            b'N' => n_count += 1,
+            _ => (),
+        }
+    }
+
+    results.gc_count += gc_count;
+    results.n_count += n_count;
     results.largest_contig = results.largest_contig.max(length);
     results.shortest_contig = results.shortest_contig.min(length);
 
@@ -126,7 +133,7 @@ fn calc_nq_stats(lengths: &mut [usize], results: &mut AnalysisResults) {
     for &mut length in lengths {
         cumulative_length += length;
         cumulative_sequences += 1;
-        
+
         if results.n25 == 0 && cumulative_length >= total_length / 4 {
             results.n25 = length;
             results.n25_sequence_count = cumulative_sequences;
@@ -216,7 +223,6 @@ fn print_results(results: &AnalysisResults) {
     .unwrap();
     stdout.flush().unwrap();
 }
-
 /// Appends the analysis results to a CSV file.
 ///
 /// If the file doesn't exist, it will be created and a header row will be written.
@@ -233,7 +239,6 @@ fn print_results(results: &AnalysisResults) {
 fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()> {
     let file_exists = Path::new(csv_filename).exists();
     let file = OpenOptions::new()
-        .write(true)
         .append(true)
         .create(true)
         .open(csv_filename)?;
@@ -242,7 +247,7 @@ fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()
     let fd = file.as_raw_fd();
     unsafe { libc::flock(fd, libc::LOCK_EX) }; // Acquire exclusive lock
 
-    
+
     let mut csv_writer = CsvWriter::new(BufWriter::new(file));
 
     if !file_exists {
@@ -257,13 +262,13 @@ fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()
 
 fn parse_args(args: &[String]) -> (Option<String>, String) {
     let mut csv_filename = None;
-    let mut fasta_file = String::new();
+    let mut fasta_file = String::with_capacity(1000);
     let mut i = 1;
 
     while i < args.len() {
         match args[i].as_str() {
             "-c" | "--csv" if i + 1 < args.len() => {
-                csv_filename = Some(args[i + 1].clone());
+                csv_filename = Some(args[i + 1].to_string());
                 i += 2;
             }
             _ => {
@@ -278,25 +283,7 @@ fn parse_args(args: &[String]) -> (Option<String>, String) {
     (csv_filename, fasta_file)
 }
 
-impl AnalysisResults {
-    fn new(fasta_file: String) -> Self {
-        AnalysisResults {
-            filename: fasta_file,
-            total_length: 0,
-            sequence_count: 0,
-            gc_count: 0,
-            n_count: 0,
-            n25: 0,
-            n25_sequence_count: 0,
-            n50: 0,
-            n50_sequence_count: 0,
-            n75: 0,
-            n75_sequence_count: 0,
-            largest_contig: 0,
-            shortest_contig: usize::MAX,
-        }
-    }
-}
+
 
 struct CsvWriter<W: Write> {
     writer: W,
@@ -316,13 +303,13 @@ impl<W: Write> CsvWriter<W> {
         write!(self.writer, "{};", filename)?;
         write!(self.writer, "{};", results.total_length)?;
         write!(self.writer, "{};", results.sequence_count)?;
-        write!(self.writer, "{:.2};", results.total_length as f64 / results.sequence_count as f64)?;
+        write!(self.writer, "{};", results.total_length as f64 / results.sequence_count as f64)?;
         write!(self.writer, "{};", results.largest_contig)?;
         write!(self.writer, "{};", results.shortest_contig)?;
         write!(self.writer, "{};", results.n50)?;
-        write!(self.writer, "{:.2};", (results.gc_count as f64 / results.total_length as f64) * 100.0)?;
+        write!(self.writer, "{};", (results.gc_count as f64 / results.total_length as f64) * 100.0)?;
         write!(self.writer, "{};", results.n_count)?;
-        writeln!(self.writer, "{:.2}", (results.n_count as f64 / results.total_length as f64) * 100.0)?;
+        writeln!(self.writer, "{}", (results.n_count as f64 / results.total_length as f64) * 100.0)?;
         Ok(())
     }
 }

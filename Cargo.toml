@@ -23,8 +23,8 @@ inherits = "release"
 lto = "thin"
 
 [dependencies]
-bio = "2.0.3"
 libc = "0.2"
+seq_io = "0.3.2"
 
 # Config for 'cargo dist'
 [workspace.metadata.dist]
