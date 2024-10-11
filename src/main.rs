@@ -15,9 +15,9 @@ use std::path::Path;
 
 /// Holds the results of the sequence analysis.
 #[derive(Default)]
-struct AnalysisResults {
+struct AnalysisResults<'a> {
     /// Names of the analyzed FASTA files.
-    filename: String,
+    filename: &'a str,
     /// Total length of all sequences combined.
     total_length: usize,
     /// Number of sequences in all files.
@@ -59,18 +59,16 @@ fn main() -> io::Result<()> {
         shortest_contig: usize::MAX,
         ..Default::default()
     };
-    let mut lengths = Vec::with_capacity(1000);
+    let mut lengths = Vec::with_capacity(2500);
 
-    while let Some(result) = fasta_reader.next() {
-        let record = result.expect("Error reading record");
-        process_sequence(&record, &mut results, &mut lengths)?;
-    }
+    process_fasta(&mut fasta_reader, &mut results, &mut lengths)?;
 
-    calc_nq_stats(&mut lengths, &mut results);
-
+    lengths.sort_unstable_by(|a, b| b.cmp(a)); // Sort in descending order
     if let Some(csv_file) = csv_filename {
-        append_to_csv(&results, &csv_file)?;
+        calc_n50_stats(&mut lengths, &mut results);
+        append_to_csv(&results, csv_file)?;
     } else {
+        calc_nq_stats(&mut lengths, &mut results);
         print_results(&results);
     }
     Ok(())
@@ -85,14 +83,6 @@ fn main() -> io::Result<()> {
 /// # Returns
 ///
 /// An `AnalysisResults` struct containing the computed statistics.
-///```
-/// fn process_sequence(
-///    sequence: std::borrow::Cow<'_, str>,
-///    results: &mut AnalysisResults,
-///    lengths: &mut Vec<usize>,
-/// ) {
-///
-/// ```
 ///
 
 fn process_sequence(record: &RefRecord, results: &mut AnalysisResults, lengths: &mut Vec<usize>) -> io::Result<()> {
@@ -105,9 +95,9 @@ fn process_sequence(record: &RefRecord, results: &mut AnalysisResults, lengths: 
         sequence_length += line.len();
 
         for &c in line {
-            match c.to_ascii_uppercase() {
-                b'G' | b'C' => gc_count += 1,
-                b'N' => n_count += 1,
+            match c {
+                b'G' | b'C' | b'g' | b'c' => gc_count += 1,
+                b'N' | b'n' => n_count += 1,
                 _ => (),
             }
         }
@@ -129,13 +119,14 @@ fn process_sequence(record: &RefRecord, results: &mut AnalysisResults, lengths: 
 ///
 /// * `results` - The `AnalysisResults` struct containing the analysis results
 /// * `interval_size` - The interval size used for the length histogram
-fn calc_nq_stats(lengths: &mut [usize], results: &mut AnalysisResults) {
-    lengths.sort_unstable_by(|a, b| b.cmp(a)); // Sort in descending order
+fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
+
     let total_length = results.total_length;
     let mut cumulative_length = 0;
     let mut cumulative_sequences = 0;
+    let lengths = lengths;
 
-    for &mut length in lengths {
+    for &length in lengths {
         cumulative_length += length;
         cumulative_sequences += 1;
 
@@ -155,6 +146,43 @@ fn calc_nq_stats(lengths: &mut [usize], results: &mut AnalysisResults) {
     }
 }
 
+
+fn calc_n50_stats(lengths: &[usize], results: &mut AnalysisResults) {
+    let total_length = results.total_length;
+    let mut cumulative_length = 0;
+    let mut cumulative_sequences = 0;
+
+    for &length in lengths {
+        cumulative_length += length;
+        cumulative_sequences += 1;
+
+        if results.n25 == 0 && cumulative_length >= total_length / 4 {
+            results.n25 = length;
+            results.n25_sequence_count = cumulative_sequences;
+        }
+        if results.n50 == 0 && cumulative_length >= total_length / 2 {
+            results.n50 = length;
+            results.n50_sequence_count = cumulative_sequences;
+            break;
+        }
+        if results.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
+            results.n75 = length;
+            results.n75_sequence_count = cumulative_sequences;
+        }
+    }
+}
+
+fn process_fasta<R: io::Read>(
+    fasta_reader: &mut Reader<R>,
+    results: &mut AnalysisResults,
+    lengths: &mut Vec<usize>
+) -> io::Result<()> {
+    while let Some(result) = fasta_reader.next() {
+        let record = result.expect("Failed to get RefRecord of secuence") ;
+        process_sequence(&record, results, lengths)?;
+    }
+    Ok(())
+}
 /// Prints the analysis results to the console.
 ///
 /// # Arguments
@@ -247,7 +275,7 @@ fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()
         .append(true)
         .create(true)
         .open(csv_filename)?;
-
+    
     // Use `flock` to lock the file before writing
     let fd = file.as_raw_fd();
     unsafe { libc::flock(fd, libc::LOCK_EX) }; // Acquire exclusive lock
@@ -265,27 +293,27 @@ fn append_to_csv(results: &AnalysisResults, csv_filename: &str) -> io::Result<()
     Ok(())
 }
 
-fn parse_args(args: &[String]) -> (Option<String>, String) {
+fn parse_args(args: &[String]) -> (Option<&str>, &str) {
     let mut csv_filename = None;
-    let mut fasta_file = String::with_capacity(1000);
+    let mut fasta_file = "";
     let mut i = 1;
 
     while i < args.len() {
         match args[i].as_str() {
             "-c" | "--csv" if i + 1 < args.len() => {
-                csv_filename = Some(args[i + 1].to_string());
+                csv_filename = Some(&args[i + 1]);
                 i += 2;
             }
             _ => {
                 if fasta_file.is_empty() {
-                    fasta_file = args[i].to_string();
+                    fasta_file = &args[i];
                 }
                 i += 1;
             }
         }
     }
 
-    (csv_filename, fasta_file)
+    (csv_filename.map(|x| x.as_str()), fasta_file)
 }
 
 
