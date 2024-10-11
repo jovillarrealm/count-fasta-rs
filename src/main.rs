@@ -6,7 +6,7 @@
 //! appended to a CSV file for further analysis.
 
 //use std::collections::HashMap;
-use seq_io::fasta::Reader;
+use seq_io::fasta::{Reader, RefRecord};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, stdout, BufReader, BufWriter, Write};
@@ -63,7 +63,7 @@ fn main() -> io::Result<()> {
 
     while let Some(result) = fasta_reader.next() {
         let record = result.expect("Error reading record");
-        process_sequence(&record.full_seq(), &mut results, &mut lengths);
+        process_sequence(&record, &mut results, &mut lengths)?;
     }
 
     calc_nq_stats(&mut lengths, &mut results);
@@ -95,27 +95,32 @@ fn main() -> io::Result<()> {
 /// ```
 ///
 
-fn process_sequence(sequence: &[u8], results: &mut AnalysisResults, lengths: &mut Vec<usize>) {
-    let length = sequence.len();
+fn process_sequence(record: &RefRecord, results: &mut AnalysisResults, lengths: &mut Vec<usize>) -> io::Result<()> {
     results.sequence_count += 1;
-    results.total_length += length;
+    let mut sequence_length:usize = 0;
     let mut gc_count = 0;
     let mut n_count = 0;
+    
+    for line in record.seq_lines() {
+        sequence_length += line.len();
 
-    for &c in sequence {
-        match c.to_ascii_uppercase() {
-            b'G' | b'C'  => gc_count += 1,
-            b'N' => n_count += 1,
-            _ => (),
+        for &c in line {
+            match c.to_ascii_uppercase() {
+                b'G' | b'C' => gc_count += 1,
+                b'N' => n_count += 1,
+                _ => (),
+            }
         }
     }
 
+    results.total_length += sequence_length;
     results.gc_count += gc_count;
     results.n_count += n_count;
-    results.largest_contig = results.largest_contig.max(length);
-    results.shortest_contig = results.shortest_contig.min(length);
-
-    lengths.push(length);
+    results.largest_contig = results.largest_contig.max(sequence_length);
+    results.shortest_contig = results.shortest_contig.min(sequence_length);
+    
+    lengths.push(sequence_length);
+    Ok(())
 }
 
 /// Calculate N25, N50, N75 stats
