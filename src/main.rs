@@ -53,7 +53,7 @@ fn main() -> io::Result<()> {
     let (csv_filename, fasta_file) = parse_args(&args);
 
     let file = File::open(fasta_file)?;
-    let buffer_size = 1024*1024;
+    let buffer_size = 1024*1024*16;
     if fasta_file.ends_with(".gz") {
         let gz_reader = GzDecoder::new(file);
         let buf_reader = BufReader::with_capacity(buffer_size, gz_reader);
