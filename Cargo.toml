@@ -1,6 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
@@ -23,6 +23,7 @@ inherits = "release"
 lto = "thin"
 
 [dependencies]
+flate2 = "1.0.34"
 libc = "0.2"
 seq_io = "0.3.2"
 
