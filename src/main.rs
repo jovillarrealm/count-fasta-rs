@@ -13,6 +13,7 @@ use std::io::{self, stdout, BufReader, BufWriter, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use flate2::read::GzDecoder;
+use zip::read::ZipArchive;
 
 /// Holds the results of the sequence analysis.
 #[derive(Default)]
@@ -51,29 +52,43 @@ fn main() -> io::Result<()> {
 
     let (csv_filename, fasta_file) = parse_args(&args);
 
-    let file = File::open(&fasta_file)?;
-    let buf_reader: Box<dyn io::Read> = if fasta_file.ends_with(".gz") {
-        Box::new(GzDecoder::new(file))  // Handle Gzip compression
-    } else {
-        Box::new(BufReader::new(file))  // Handle uncompressed file
-    };
-    let mut fasta_reader = Reader::new(buf_reader);
+    let file = File::open(fasta_file)?;
+    let buffer_size = 1024*1024;
+    if fasta_file.ends_with(".gz") {
+        let gz_reader = GzDecoder::new(file);
+        let buf_reader = BufReader::with_capacity(buffer_size, gz_reader);
+        process_file(buf_reader, fasta_file, csv_filename)?;
 
+    } else if fasta_file.ends_with(".zip") {
+        let mut archive = ZipArchive::new(file)?;
+        let file_in_zip = archive.by_index(0)?; // Assuming the first file
+        let buf_reader = BufReader::with_capacity(buffer_size, file_in_zip);
+        process_file(buf_reader, fasta_file, csv_filename)?;
+    } else {
+        let buf_reader = BufReader::with_capacity(buffer_size, file);
+        process_file(buf_reader, fasta_file, csv_filename)?;
+    }
+    Ok(())
+}
+
+fn process_file<R: io::Read>(buf_reader: BufReader<R>, fasta_file: &str, csv_filename: Option<&str>) -> Result<(), io::Error> {
+    let mut fasta_reader = Reader::new(buf_reader);
     let mut results = AnalysisResults {
         filename: fasta_file,
         shortest_contig: usize::MAX,
         ..Default::default()
     };
-    let mut lengths = Vec::with_capacity(2500);
-
-    process_fasta(&mut fasta_reader, &mut results, &mut lengths)?;
-
-    lengths.sort_unstable_by(|a, b| b.cmp(a)); // Sort in descending order
+    let mut lengths = Vec::with_capacity(500);
+    while let Some(result) = fasta_reader.next() {
+        let record = result.expect("Failed to get RefRecord of secuence") ;
+        process_sequence(&record, &mut results, &mut lengths)?;
+    }
+    lengths.sort_unstable_by(|a, b| b.cmp(a));
     if let Some(csv_file) = csv_filename {
-        calc_n50_stats(&mut lengths, &mut results);
+        calc_n50_stats(& lengths, &mut results);
         append_to_csv(&results, csv_file)?;
     } else {
-        calc_nq_stats(&mut lengths, &mut results);
+        calc_nq_stats(&lengths, &mut results);
         print_results(&results);
     }
     Ok(())
@@ -129,7 +144,6 @@ fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
     let total_length = results.total_length;
     let mut cumulative_length = 0;
     let mut cumulative_sequences = 0;
-    let lengths = lengths;
 
     for &length in lengths {
         cumulative_length += length;
@@ -177,17 +191,6 @@ fn calc_n50_stats(lengths: &[usize], results: &mut AnalysisResults) {
     }
 }
 
-fn process_fasta<R: io::Read>(
-    fasta_reader: &mut Reader<R>,
-    results: &mut AnalysisResults,
-    lengths: &mut Vec<usize>
-) -> io::Result<()> {
-    while let Some(result) = fasta_reader.next() {
-        let record = result.expect("Failed to get RefRecord of secuence") ;
-        process_sequence(&record, results, lengths)?;
-    }
-    Ok(())
-}
 /// Prints the analysis results to the console.
 ///
 /// # Arguments

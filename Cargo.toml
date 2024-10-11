@@ -26,6 +26,7 @@ lto = "thin"
 flate2 = "1.0.34"
 libc = "0.2"
 seq_io = "0.3.2"
+zip = "2.2.0"
 
 # Config for 'cargo dist'
 [workspace.metadata.dist]
