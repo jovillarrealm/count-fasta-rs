@@ -23,9 +23,11 @@ inherits = "release"
 lto = "thin"
 
 [dependencies]
+tokio = { version = "1.40.0", features = ["full"] }
+futures = "0.3.31"
+parking_lot = "0.12.3"
+clap = { version = "4.5.20", features = ["derive"] }
 flate2 = "1.0.34"
-libc = "0.2"
-seq_io = "0.3.2"
 zip = "2.2.0"
 
 # Config for 'cargo dist'
