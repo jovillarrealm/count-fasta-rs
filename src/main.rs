@@ -297,7 +297,7 @@ async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::R
 
     for result in results {
         let line = format!(
-            "{};{};{};{:.2};{};{};{};{:.2};{};{:.2}\n",
+            "{};{};{};{:.5};{};{};{};{:.5};{};{:.5}\n",
             result.filename,
             result.total_length,
             result.sequence_count,
