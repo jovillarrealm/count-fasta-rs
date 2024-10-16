@@ -19,7 +19,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["../cnsg-scripts/aphelenchochoides/GENOMIC/GCA_024699865_Aphelenchoides-fujianensis_Dali.fna"],
+            "args": ["../count-fasta-c/GENOMIC/GCA_000009765_Streptomyces-avermitilis_MA-4680.fna"],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -37,7 +37,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["-c", "data.csv","../cnsg-scripts/aphelenchochoides/GENOMIC/GCA_024699865_Aphelenchoides-fujianensis_Dali.fna"],
+            "args": ["-c", "data.csv","../count-fasta-c/GENOMIC/GCA_000009765_Streptomyces-avermitilis_MA-4680.fna"],
             "cwd": "${workspaceFolder}"
         },
         {

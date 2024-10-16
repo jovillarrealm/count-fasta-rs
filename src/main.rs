@@ -89,7 +89,12 @@ async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> 
             async move {
                 let file_str = file.to_str().unwrap().to_string();
                 let mut local_result = AnalysisResults {
-                    filename: Path::new(&file_str).file_name().unwrap().to_str().unwrap().to_string(),
+                    filename: Path::new(&file_str)
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
                     shortest_contig: usize::MAX,
                     ..Default::default()
                 };
@@ -130,14 +135,24 @@ async fn process_fasta_file(file: &Path, results: &mut AnalysisResults) -> io::R
     while let Some(line) = lines.next_line().await? {
         if line.starts_with('>') {
             if current_sequence_length > 0 {
+                results.total_length += current_sequence_length;
+                results.largest_contig = results.largest_contig.max(current_sequence_length);
+                results.shortest_contig = results.shortest_contig.min(current_sequence_length);
                 lengths.push(current_sequence_length);
                 current_sequence_length = 0;
             }
             results.sequence_count += 1;
         } else {
-            process_sequence_line(&line, results);
-            current_sequence_length += line.len();
+            let line_len = process_sequence_line(&line, results);
+            current_sequence_length += line_len;
         }
+    }
+    if current_sequence_length > 0 {
+        results.total_length += current_sequence_length;
+        results.largest_contig = results.largest_contig.max(current_sequence_length);
+        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
+        lengths.push(current_sequence_length);
+        current_sequence_length = 0;
     }
 
     if current_sequence_length > 0 {
@@ -174,6 +189,7 @@ fn process_reader<R: Read>(
         let line = line_result?;
         if line.starts_with('>') {
             if current_sequence_length > 0 {
+                results.total_length += current_sequence_length;
                 results.largest_contig = results.largest_contig.max(current_sequence_length);
                 results.shortest_contig = results.shortest_contig.min(current_sequence_length);
                 lengths.push(current_sequence_length);
@@ -194,7 +210,7 @@ fn process_reader<R: Read>(
 }
 
 fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
-    results.total_length += line.len();
+    let line = line.trim();
     let mut gc_count = 0;
     let mut n_count = 0;
     for c in line.bytes() {
@@ -206,7 +222,7 @@ fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
     }
     results.gc_count += gc_count;
     results.n_count += n_count;
-    line.trim().len()
+    line.len()
 }
 
 fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
@@ -234,11 +250,10 @@ fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
 }
 
 fn print_results(results: &AnalysisResults) {
-    println!("\nResults for file: {}", results.filename);
-    println!("Total length of sequence:\t{} bp", results.total_length);
+    println!("\nTotal length of sequence:\t{} bp", results.total_length);
     println!("Total number of sequences:\t{}", results.sequence_count);
     println!(
-        "Average contig length:\t{} bp",
+        "Average contig length is:\t{} bp",
         results.total_length / results.sequence_count
     );
     println!("Largest contig:\t\t{} bp", results.largest_contig);
@@ -275,14 +290,14 @@ async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::R
         .append(true)
         .open(csv_filename)
         .await?;
-    if ! csv_exists  {
+    if !csv_exists {
         let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
         file.write_all(header.as_bytes()).await?;
     }
 
     for result in results {
         let line = format!(
-            "{};{};{};{:.5};{};{};{};{:.5};{};{:.5}\n",
+            "{};{};{};{:.2};{};{};{};{:.2};{};{:.2}\n",
             result.filename,
             result.total_length,
             result.sequence_count,
