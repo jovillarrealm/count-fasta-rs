@@ -22,6 +22,7 @@ rpath = false
 inherits = "release"
 lto = "thin"
 
+
 [dependencies]
 tokio = { version = "1.40.0", features = ["full"] }
 futures = "0.3.31"
@@ -30,18 +31,5 @@ clap = { version = "4.5.20", features = ["derive"] }
 flate2 = "1.0.34"
 zip = "2.2.0"
 
-# Config for 'cargo dist'
-[workspace.metadata.dist]
-# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.22.1"
-# CI backends to support
-ci = "github"
-# The installers to generate for each app
-installers = ["shell"]
-# Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
-# Path that installers should place binaries in
-install-path = "CARGO_HOME"
-# Whether to install an updater program
-install-updater = false
+
 #RUSTFLAGS="-C target-feature=+crt-static" cargo build --target x86_64-unknown-linux-gnu --release
