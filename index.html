@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en" id="oranda" class="hacker">
+  <head>
+    <title>count-fasta-rs</title>
+    
+    
+      <link rel="icon" href="/count-fasta-rs/favicon.ico" />
+    
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="count-fasta-rs" />
+    
+    
+    
+    <meta http-equiv="Permissions-Policy" content="interest-cohort=()" />
+    <link rel="stylesheet" href="/count-fasta-rs/oranda-v0.6.1.css" />
+    
+    
+  </head>
+  <body>
+    <div class="container">
+      <div class="page-body">
+        
+          <div class="repo_banner">
+            <a href="https://github.com/jovillarrealm/count-fasta-rs">
+              <div class="github-icon" aria-hidden="true"></div>
+              Check out our GitHub!
+            </a>
+          </div>
+        
+
+        <main>
+          <header>
+            
+            <h1 class="title">count-fasta-rs</h1>
+            
+  <nav class="nav">
+    <ul>
+      <li><a href="/count-fasta-rs/">Home</a></li>
+
+      
+
+      
+
+      
+
+      
+
+      
+        <li><a href="/count-fasta-rs/changelog/">Changelog</a></li>
+      
+    </ul>
+  </nav>
+
+          </header>
+
+          
+
+
+    <h1>count-fasta-rs</h1>
+<p>This utility gives some stats on assembly reports</p>
+<pre style="background-color:#263238;"><span style="color:#eeffff;">Usage: rs-count-fasta [-c csv_file] &lt;fasta_file&gt;
+</span></pre>
+
+<h2>Usage</h2>
+<p>When a csv file is not specified</p>
+<pre style="background-color:#263238;"><span style="color:#eeffff;">rs-count-fasta ../cnsg-scripts/GENOMIC/GCA_024699835_Aphelenchoides-besseyi_AORJ.fna 
+</span></pre>
+
+<p>Output to stdout will look like this</p>
+<pre style="background-color:#263238;"><span style="color:#eeffff;">    </span><span style="color:#f07178;">Total length of sequence</span><span style="color:#89ddff;">:       </span><span style="color:#c3e88d;">46759715 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Total number of sequences</span><span style="color:#89ddff;">:      </span><span style="color:#f78c6c;">32
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Average contig length is</span><span style="color:#89ddff;">:       </span><span style="color:#c3e88d;">1461241 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Largest contig</span><span style="color:#89ddff;">:         </span><span style="color:#c3e88d;">18100598 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Shortest contig</span><span style="color:#89ddff;">:                </span><span style="color:#c3e88d;">214 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">N25 stats</span><span style="color:#89ddff;">:                      </span><span style="color:#c3e88d;">25% of total sequence length is contained in the 1 sequences &gt;= 18100598 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">N50 stats</span><span style="color:#89ddff;">:                      </span><span style="color:#c3e88d;">50% of total sequence length is contained in the 2 sequences &gt;= 16068654 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">N75 stats</span><span style="color:#89ddff;">:                      </span><span style="color:#c3e88d;">75% of total sequence length is contained in the 3 sequences &gt;= 10965501 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Total GC count</span><span style="color:#89ddff;">:                 </span><span style="color:#c3e88d;">19534458 bp
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">GC %</span><span style="color:#89ddff;">:                           </span><span style="color:#c3e88d;">41.78 %
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Number of Ns</span><span style="color:#89ddff;">:                   </span><span style="color:#f78c6c;">2900
+</span><span style="color:#eeffff;">    </span><span style="color:#f07178;">Ns %</span><span style="color:#89ddff;">:                           </span><span style="color:#c3e88d;">0.01 %
+</span></pre>
+
+<p>If the csv file was specified, then the created file will look like this</p>
+<pre style="background-color:#263238;"><span style="color:#eeffff;">    filename</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">assembly_length</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">number_of_sequences</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">average_length</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">largest_contig</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">shortest_contig</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">N50</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">GC_percentage</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">total_N</span><span style="color:#89ddff;">;</span><span style="color:#eeffff;">N_percentage
+</span><span style="color:#eeffff;">    </span><span style="color:#89ddff;">"</span><span style="color:#c3e88d;">GCA_024699835_Aphelenchoides-besseyi_AORJ.fna</span><span style="color:#89ddff;">";</span><span style="color:#f78c6c;">46759715</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">32</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">1461241.09</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">18100598</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">214</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">16068654</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">41.78</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">2900</span><span style="color:#89ddff;">;</span><span style="color:#f78c6c;">0.01
+</span></pre>
+
+<h3>Notes on usage</h3>
+<p>Concurrency is not recommended when a new file has to be created, otherwise the header line may result out of order.</p>
+<p>As a mitigation you could first run it on single file, and then introduce the concurrency on things like xargs or gnu parallel.</p>
+<p>If it runs on an empty file, it will not introduce the header line.</p>
+
+
+
+        </main>
+      </div>
+
+      <footer>
+        
+          <a href="https://github.com/jovillarrealm/count-fasta-rs"><div class="github-icon" aria-hidden="true"></div></a>
+        
+        <span>
+          count-fasta-rs
+        </span>
+      </footer>
+    </div>
+
+    
+    
+
+    
+
+
+  </body>
+</html>
