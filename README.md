@@ -2,7 +2,16 @@
 
 This utility gives some stats on assembly reports
 
-    Usage: rs-count-fasta [-c csv_file] <fasta_file>
+    Usage: count-fasta-rs [OPTIONS] [FASTA FILE (.fa .fasta .fna .zip .gz)]...
+
+    Arguments:
+      [FASTA FILE (.fa .fasta .fna .zip .gz)]...  
+
+    Options:
+      -c, --csv <CSV>              
+      -d, --directory <DIRECTORY>  
+      -h, --help                   Print help
+      -V, --version                Print version
 
 ## Usage 
 When a csv file is not specified 
@@ -31,10 +40,8 @@ If the csv file was specified, then the created file will look like this
     filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage
     "GCA_024699835_Aphelenchoides-besseyi_AORJ.fna";46759715;32;1461241.09;18100598;214;16068654;41.78;2900;0.01
 ```
-### Notes on usage
+If you are setting a -d directory, you should probably set a -c csv file to go with it
 
-Concurrency is not recommended when a new file has to be created, otherwise the header line may result out of order.
+## Implementation deets
 
-As a mitigation you could first run it on single file, and then introduce the concurrency on things like xargs or gnu parallel.
-
-If it runs on an empty file, it will not introduce the header line.
+It uses tokio to handle I/O asynchronously. It uses flate2 to handle gzipped files.
