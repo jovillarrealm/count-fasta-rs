@@ -1,6 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.5.4"
+version = "0.5.5"
 author = "CNSG"
 edition = "2021"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"

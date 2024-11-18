@@ -232,6 +232,9 @@ fn process_reader<R: Read>(
     }
 
     if current_sequence_length > 0 {
+        results.total_length += current_sequence_length;
+        results.largest_contig = results.largest_contig.max(current_sequence_length);
+        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
         lengths.push(current_sequence_length);
     }
 
