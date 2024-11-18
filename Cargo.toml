@@ -21,7 +21,7 @@ rpath = false
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "true"
+lto = true
 
 [dependencies]
 tokio = { version = "1.40.0", features = ["full"] }
