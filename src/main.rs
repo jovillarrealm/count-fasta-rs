@@ -1,13 +1,24 @@
 use clap::Parser;
 use flate2::read::GzDecoder;
 use futures::stream::{self, StreamExt};
+use memchr::memchr_iter;
 use parking_lot::Mutex;
+use std::env;
 use std::io::{BufRead, BufReader as StdBufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use zip::read::ZipArchive;
+
+fn determine_buffer_size() -> usize {
+    let default_size = 8 * 1024; // Default to 1kB
+    let max_size = 10 * 1024 * 1024; // Cap at 10MB
+    match env::var("BUFFER_SIZE") {
+        Ok(val) => val.parse().unwrap_or(default_size).min(max_size),
+        Err(_) => default_size,
+    }
+}
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -82,7 +93,8 @@ async fn get_fasta_files_from_directory(dir: &str) -> io::Result<Vec<PathBuf>> {
 
 async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> {
     let results = Arc::new(Mutex::new(Vec::new()));
-
+    // Determine the buffer size for reading raw fasta files
+    let buffer_size = determine_buffer_size();
     stream::iter(files)
         .map(|file| {
             let results = Arc::clone(&results);
@@ -104,7 +116,7 @@ async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> 
                 } else if file_str.ends_with(".zip") {
                     process_zip_file(&file, &mut local_result).await
                 } else {
-                    process_fasta_file(&file, &mut local_result).await
+                    process_fasta_file(&file, &mut local_result, buffer_size).await
                 };
 
                 if let Err(e) = result {
@@ -125,9 +137,13 @@ async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> 
     Ok(Arc::try_unwrap(results).unwrap().into_inner())
 }
 
-async fn process_fasta_file(file: &Path, results: &mut AnalysisResults) -> io::Result<()> {
+async fn process_fasta_file(
+    file: &Path,
+    results: &mut AnalysisResults,
+    buffer_size: usize,
+) -> io::Result<()> {
     let file = File::open(file).await?;
-    let reader = TokioBufReader::with_capacity(1024 * 1024, file); // 1MB buffer
+    let reader = TokioBufReader::with_capacity(buffer_size, file);
     let mut lines = reader.lines();
     let mut lengths = Vec::with_capacity(500);
     let mut current_sequence_length = 0;
@@ -173,16 +189,30 @@ async fn process_gz_file(file: &Path, results: &mut AnalysisResults) -> io::Resu
 async fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> io::Result<()> {
     let file = std::fs::File::open(file)?;
     let mut archive = ZipArchive::new(file)?;
-    let first_file = archive.by_index(0)?;
-    let reader = StdBufReader::new(first_file);
-    process_reader(reader, results)
+    // Iterate through each file in the ZIP archive
+    for i in 0..archive.len() {
+        let file = archive.by_index(i)?;
+        if file.is_file() {
+            let file_name = file.name();
+
+            if file_name.ends_with(".fasta")
+                || file_name.ends_with(".fa")
+                || file_name.ends_with(".fna")
+            {
+                // Process the file (example: pass to process_fasta_file)
+                let reader = StdBufReader::new(file);
+                return process_reader(reader, results);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn process_reader<R: Read>(
     reader: StdBufReader<R>,
     results: &mut AnalysisResults,
 ) -> io::Result<()> {
-    let mut lengths = Vec::with_capacity(500);
+    let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
 
     for line_result in reader.lines() {
@@ -211,18 +241,14 @@ fn process_reader<R: Read>(
 
 fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
     let line = line.trim();
-    let mut gc_count = 0;
-    let mut n_count = 0;
-    for c in line.bytes() {
-        match c {
-            b'G' | b'C' | b'g' | b'c' => gc_count += 1,
-            b'N' | b'n' => n_count += 1,
-            _ => (),
-        }
-    }
-    results.gc_count += gc_count;
-    results.n_count += n_count;
-    line.len()
+    let line_bytes = line.as_bytes();
+    results.gc_count += memchr_iter(b'G', line_bytes).count() as usize;
+    results.gc_count += memchr_iter(b'C', line_bytes).count() as usize;
+    results.gc_count += memchr_iter(b'g', line_bytes).count() as usize;
+    results.gc_count += memchr_iter(b'c', line_bytes).count() as usize;
+    results.n_count += memchr_iter(b'N', line_bytes).count() as usize;
+    results.n_count += memchr_iter(b'n', line_bytes).count() as usize;
+    line_bytes.len()
 }
 
 fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
@@ -290,14 +316,16 @@ async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::R
         .append(true)
         .open(csv_filename)
         .await?;
+
     if !csv_exists {
         let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
         file.write_all(header.as_bytes()).await?;
     }
 
+    let mut buffer = String::new();
     for result in results {
         let line = format!(
-            "{};{};{};{:.5};{};{};{};{:.5};{};{:.5}\n",
+            "{};{};{};{:.7};{};{};{};{:.7};{};{:.7}\n",
             result.filename,
             result.total_length,
             result.sequence_count,
@@ -307,9 +335,19 @@ async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::R
             result.n50,
             (result.gc_count as f64 / result.total_length as f64) * 100.0,
             result.n_count,
-            (result.n_count as f64 / result.total_length as f64) * 100.0
+            (result.n_count as f64 / result.total_length as f64) * 100.0,
         );
-        file.write_all(line.as_bytes()).await?;
+        buffer.push_str(&line);
+
+        // Write in chunks to avoid holding too much in memory
+        if buffer.len() > 64 * 1024 {
+            file.write_all(buffer.as_bytes()).await?;
+            buffer.clear();
+        }
+    }
+
+    if !buffer.is_empty() {
+        file.write_all(buffer.as_bytes()).await?;
     }
 
     file.flush().await?;
