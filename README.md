@@ -16,7 +16,7 @@ This utility gives some stats on assembly reports
 ## Usage 
 When a csv file is not specified 
 
-    rs-count-fasta ../cnsg-scripts/GENOMIC/GCA_024699835_Aphelenchoides-besseyi_AORJ.fna 
+    count-fasta-rs ../cnsg-scripts/GENOMIC/GCA_024699835_Aphelenchoides-besseyi_AORJ.fna 
 
 Output to stdout will look like this
 
