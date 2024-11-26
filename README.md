@@ -13,6 +13,11 @@ This utility gives some stats on assembly reports
       -h, --help                   Print help
       -V, --version                Print version
 
+## Installation
+
+Install the binary for your OS and architecture from the latest [release page](https://github.com/jovillarrealm/count-fasta-rs/releases) , or use the standalone installers. 
+
+
 ## Usage 
 When a csv file is not specified 
 
