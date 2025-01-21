@@ -1,7 +1,7 @@
 use clap::Parser;
 use flate2::read::GzDecoder;
 use futures::stream::{self, StreamExt};
-use memchr::memchr_iter;
+use memchr::{memchr2_iter, memchr_iter, memrchr2};
 use parking_lot::Mutex;
 use std::env;
 use std::io::{BufRead, BufReader as StdBufReader, Read};
@@ -80,9 +80,16 @@ async fn get_fasta_files_from_directory(dir: &str) -> io::Result<Vec<PathBuf>> {
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.is_file() {
-            let extension = path.extension().and_then(|ext| ext.to_str());
-            if let Some(ext) = extension {
-                if ["fa", "fasta", "gz", "zip", "fna"].contains(&ext) {
+            let filename = path.file_name().and_then(|file_name| file_name.to_str());
+            if let Some(filename) = filename {
+                if filename.ends_with(".fna.gz")
+                    || filename.ends_with(".fa.gz")
+                    || filename.ends_with(".fasta.gz")
+                    || filename.ends_with(".zip")
+                    || filename.ends_with(".fna")
+                    || filename.ends_with(".fa")
+                    || filename.ends_with(".fasta")
+                {
                     files.push(path);
                 }
             }
@@ -92,14 +99,14 @@ async fn get_fasta_files_from_directory(dir: &str) -> io::Result<Vec<PathBuf>> {
 }
 
 async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> {
-    let results = Arc::new(Mutex::new(Vec::new()));
-    // Determine the buffer size for reading raw fasta files
+    let results = Arc::new(Mutex::new(Vec::with_capacity(50_000)));
     let buffer_size = determine_buffer_size();
+
     stream::iter(files)
         .map(|file| {
             let results = Arc::clone(&results);
             async move {
-                let file_str = file.to_str().unwrap().to_string();
+                let file_str = file.to_str().unwrap();
                 let mut local_result = AnalysisResults {
                     filename: Path::new(&file_str)
                         .file_name()
@@ -111,12 +118,10 @@ async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> 
                     ..Default::default()
                 };
 
-                let result: io::Result<()> = if file_str.ends_with(".gz") {
-                    process_gz_file(&file, &mut local_result).await
-                } else if file_str.ends_with(".zip") {
-                    process_zip_file(&file, &mut local_result).await
-                } else {
-                    process_fasta_file(&file, &mut local_result, buffer_size).await
+                let result: io::Result<()> = match file_str {
+                    f if f.ends_with(".gz") => process_gz_file(&file, &mut local_result).await,
+                    f if f.ends_with(".zip") => process_zip_file(&file, &mut local_result).await,
+                    _ => process_fasta_file(&file, &mut local_result, buffer_size).await,
                 };
 
                 if let Err(e) = result {
@@ -143,13 +148,15 @@ async fn process_fasta_file(
     buffer_size: usize,
 ) -> io::Result<()> {
     let file = File::open(file).await?;
-    let reader = TokioBufReader::with_capacity(buffer_size, file);
-    let mut lines = reader.lines();
+    let mut reader = TokioBufReader::with_capacity(buffer_size, file);
+    let mut buffer = Vec::with_capacity(buffer_size);
     let mut lengths = Vec::with_capacity(500);
     let mut current_sequence_length = 0;
+    let mut delimiter = b'\n';
+    let mut sequence_length ;
 
-    while let Some(line) = lines.next_line().await? {
-        if line.starts_with('>') {
+    while reader.read_until(delimiter, &mut buffer).await? > 0 {
+        if delimiter == b'\n' {
             if current_sequence_length > 0 {
                 results.total_length += current_sequence_length;
                 results.largest_contig = results.largest_contig.max(current_sequence_length);
@@ -158,11 +165,15 @@ async fn process_fasta_file(
                 current_sequence_length = 0;
             }
             results.sequence_count += 1;
+            buffer.clear();
+            delimiter = b'>';
         } else {
-            let line_len = process_sequence_line(&line, results);
-            current_sequence_length += line_len;
+            sequence_length = process_sequence_bytes(&buffer, results);
+            current_sequence_length += sequence_length;
+            delimiter = b'\n';
         }
     }
+
     if current_sequence_length > 0 {
         results.total_length += current_sequence_length;
         results.largest_contig = results.largest_contig.max(current_sequence_length);
@@ -175,7 +186,7 @@ async fn process_fasta_file(
         lengths.push(current_sequence_length);
     }
 
-    calc_nq_stats(&lengths, results);
+    calc_nq_stats(&mut lengths, results);
     Ok(())
 }
 
@@ -238,29 +249,31 @@ fn process_reader<R: Read>(
         lengths.push(current_sequence_length);
     }
 
-    calc_nq_stats(&lengths, results);
+    calc_nq_stats(&mut lengths, results);
     Ok(())
+}
+
+fn process_sequence_bytes(buffer: &[u8], results: &mut AnalysisResults) -> usize {
+    results.gc_count += memchr2_iter(b'G', b'C', buffer).count() as usize;
+    results.n_count += memchr_iter(b'N', buffer).count() as usize;
+    let noise = memchr2_iter(b'>', b'\n', buffer).count();
+    buffer.len() - noise
 }
 
 fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
     let line = line.trim();
     let line_bytes = line.as_bytes();
-    results.gc_count += memchr_iter(b'G', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'C', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'g', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'c', line_bytes).count() as usize;
+    results.gc_count += memchr2_iter(b'G', b'C', line_bytes).count() as usize;
     results.n_count += memchr_iter(b'N', line_bytes).count() as usize;
-    results.n_count += memchr_iter(b'n', line_bytes).count() as usize;
     line_bytes.len()
 }
 
-fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
+fn calc_nq_stats(lengths: &mut [usize], results: &mut AnalysisResults) {
     let total_length: usize = lengths.iter().sum();
     let mut cumulative_length = 0;
-    let mut sorted_lengths = lengths.to_vec();
-    sorted_lengths.sort_unstable_by(|a, b| b.cmp(a));
+    lengths.sort_unstable_by(|a, b| b.cmp(a));
 
-    for (i, &length) in sorted_lengths.iter().enumerate() {
+    for (i, &length) in lengths.iter().enumerate() {
         cumulative_length += length;
         if results.n25 == 0 && cumulative_length >= total_length / 4 {
             results.n25 = length;
