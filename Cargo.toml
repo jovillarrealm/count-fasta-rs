@@ -24,12 +24,12 @@ inherits = "release"
 lto = true
 
 [dependencies]
-tokio = { version = "1.40.0", features = ["full"] }
-futures = "0.3.31"
-parking_lot = "0.12.3"
-clap = { version = "4.5.20", features = ["derive"] }
-flate2 = "1.0.34"
-zip = "2.2.0"
+clap = { version = "4.5", features = ["derive"] }
+flate2 = "1.0"
+rayon = "1.7"
+crossbeam-channel = "0.5"
+zip = "2.2.2"
+num_cpus = "1.13"
 memchr = "2.7.4"
 
 

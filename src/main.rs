@@ -1,23 +1,22 @@
 use clap::Parser;
+use crossbeam_channel::unbounded;
 use flate2::read::GzDecoder;
-use futures::stream::{self, StreamExt};
-use memchr::memchr_iter;
-use parking_lot::Mutex;
+use memchr;
+use rayon::prelude::*;
 use std::env;
-use std::io::{BufRead, BufReader as StdBufReader, Read};
+use std::fs::File;
+use std::io::BufRead;
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
-use zip::read::ZipArchive;
+use zip::ZipArchive;
 
+// Increased default buffer size for HDD optimization
 fn determine_buffer_size() -> usize {
-    let default_size = 8 * 1024; // Default to 1kB
-    let max_size = 10 * 1024 * 1024; // Cap at 10MB
-    match env::var("BUFFER_SIZE") {
-        Ok(val) => val.parse().unwrap_or(default_size).min(max_size),
-        Err(_) => default_size,
-    }
+    env::var("BUFFER_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024 * 1024) // Default 1MB
+        .min(10 * 1024 * 1024) // Max 10MB
 }
 
 #[derive(Parser, Debug)]
@@ -33,13 +32,14 @@ struct Args {
     files: Vec<String>,
 }
 
-#[derive(Default, Clone, Debug)] // Added Debug derive
+#[derive(Default, Clone, Debug)]
 struct AnalysisResults {
     filename: String,
     total_length: usize,
     sequence_count: usize,
     gc_count: usize,
     n_count: usize,
+    lengths: Vec<usize>,
     n25: usize,
     n25_sequence_count: usize,
     n50: usize,
@@ -50,228 +50,208 @@ struct AnalysisResults {
     shortest_contig: usize,
 }
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
+fn main() -> io::Result<()> {
     let args = Args::parse();
+    let files = collect_files(&args)?;
+    let (sender, receiver) = unbounded();
 
-    let mut files_to_process = Vec::new();
+    // Configure thread pool for HDD-friendly parallelism
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_cpus::get().min(6)) // Limit threads for HDD
+        .build()
+        .unwrap()
+        .install(|| {
+            files.into_par_iter().for_each_with(sender, |s, path| {
+                let mut result = match process_file(&path) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error processing {}: {}", path.display(), e);
+                        AnalysisResults::default()
+                    }
+                };
+                result.filename = path.file_name().unwrap().to_string_lossy().into_owned();
+                let _ = s.send(result);
+            });
+        });
 
-    if let Some(dir) = args.directory {
-        files_to_process.extend(get_fasta_files_from_directory(&dir).await?);
-    }
-    files_to_process.extend(args.files.into_iter().map(PathBuf::from));
+    let results: Vec<_> = receiver.try_iter().collect();
 
-    let results = process_files(files_to_process).await?;
-
-    if let Some(csv_file) = args.csv {
-        append_to_csv(&results, &csv_file).await?;
+    if let Some(csv_path) = args.csv {
+        write_csv(&results, &csv_path)?;
     } else {
-        for result in results {
-            print_results(&result);
-        }
+        results.iter().for_each(print_results);
     }
 
     Ok(())
 }
 
-async fn get_fasta_files_from_directory(dir: &str) -> io::Result<Vec<PathBuf>> {
+fn collect_files(args: &Args) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut entries = tokio::fs::read_dir(dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file() {
-            let extension = path.extension().and_then(|ext| ext.to_str());
-            if let Some(ext) = extension {
-                if ["fa", "fasta", "gz", "zip", "fna"].contains(&ext) {
-                    files.push(path);
-                }
+
+    if let Some(dir) = &args.directory {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_file() && is_fasta_file(&path) {
+                files.push(path);
             }
         }
     }
+
+    files.extend(args.files.iter().map(PathBuf::from));
     Ok(files)
 }
 
-async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> {
-    let results = Arc::new(Mutex::new(Vec::new()));
-    // Determine the buffer size for reading raw fasta files
-    let buffer_size = determine_buffer_size();
-    stream::iter(files)
-        .map(|file| {
-            let results = Arc::clone(&results);
-            async move {
-                let file_str = file.to_str().unwrap().to_string();
-                let mut local_result = AnalysisResults {
-                    filename: Path::new(&file_str)
-                        .file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_string(),
-                    shortest_contig: usize::MAX,
-                    ..Default::default()
-                };
-
-                let result: io::Result<()> = if file_str.ends_with(".gz") {
-                    process_gz_file(&file, &mut local_result).await
-                } else if file_str.ends_with(".zip") {
-                    process_zip_file(&file, &mut local_result).await
-                } else {
-                    process_fasta_file(&file, &mut local_result, buffer_size).await
-                };
-
-                if let Err(e) = result {
-                    eprintln!("Error processing file {}: {}", file_str, e);
-                } else {
-                    results.lock().push(local_result);
-                }
-            }
-        })
-        .buffer_unordered(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1),
-        )
-        .collect::<Vec<_>>()
-        .await;
-
-    Ok(Arc::try_unwrap(results).unwrap().into_inner())
+fn is_fasta_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ["fa", "fasta", "fna", "gz", "zip"].contains(&ext))
+        .unwrap_or(false)
 }
 
-async fn process_fasta_file(
-    file: &Path,
+fn process_file(path: &Path) -> io::Result<AnalysisResults> {
+    let mut results = AnalysisResults {
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
+    let buffer_size = determine_buffer_size();
+
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("gz") => {
+            let file = File::open(path)?;
+            process_fasta_chunked(GzDecoder::new(file), &mut results, buffer_size)?;
+        }
+        Some("zip") => {
+            let file = File::open(path)?;
+            let mut archive = ZipArchive::new(file)?;
+            // Process first FASTA file found in archive
+            for i in 0..archive.len() {
+                let file = archive.by_index(i)?;
+                if is_fasta_file(Path::new(file.name())) {
+                    process_fasta_chunked(file, &mut results, buffer_size)?;
+                    break;
+                }
+            }
+        }
+        _ => {
+            let file = File::open(path)?;
+            process_fasta_chunked(file, &mut results, buffer_size)?;
+        }
+    }
+
+    calc_nq_stats(&mut results);
+    Ok(results)
+}
+
+fn process_fasta_chunked<R: Read>(
+    reader: R,
     results: &mut AnalysisResults,
     buffer_size: usize,
 ) -> io::Result<()> {
-    let file = File::open(file).await?;
-    let reader = TokioBufReader::with_capacity(buffer_size, file);
-    let mut lines = reader.lines();
-    let mut lengths = Vec::with_capacity(500);
-    let mut current_sequence_length = 0;
+    let mut reader = BufReader::with_capacity(buffer_size, reader);
+    let mut buffer = Vec::with_capacity(buffer_size);
+    let mut carry_over = Vec::new();
+    let mut in_sequence = false;
 
-    while let Some(line) = lines.next_line().await? {
-        if line.starts_with('>') {
-            if current_sequence_length > 0 {
-                results.total_length += current_sequence_length;
-                results.largest_contig = results.largest_contig.max(current_sequence_length);
-                results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-                lengths.push(current_sequence_length);
-                current_sequence_length = 0;
-            }
-            results.sequence_count += 1;
-        } else {
-            let line_len = process_sequence_line(&line, results);
-            current_sequence_length += line_len;
+    loop {
+        buffer.clear();
+        let bytes_read = reader.read_until(b'>', &mut buffer)?;
+        if bytes_read == 0 {
+            break;
         }
-    }
-    if current_sequence_length > 0 {
-        results.total_length += current_sequence_length;
-        results.largest_contig = results.largest_contig.max(current_sequence_length);
-        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-        lengths.push(current_sequence_length);
-        current_sequence_length = 0;
-    }
 
-    if current_sequence_length > 0 {
-        lengths.push(current_sequence_length);
-    }
+        // Combine carry_over with new buffer contents
+        let mut combined = carry_over.clone();
+        combined.extend_from_slice(&buffer);
 
-    calc_nq_stats(&lengths, results);
-    Ok(())
-}
+        let headers = memchr::memchr_iter(b'>', &combined)
+            .filter(|&pos| pos == 0 || combined[pos - 1] == b'\n');
 
-async fn process_gz_file(file: &Path, results: &mut AnalysisResults) -> io::Result<()> {
-    let file = std::fs::File::open(file)?;
-    let gz = GzDecoder::new(file);
-    let reader = StdBufReader::new(gz);
-    process_reader(reader, results)
-}
+        let mut last_pos = 0;
+        let mut processed_headers = 0;
+        let headers2 = headers.clone();
 
-async fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> io::Result<()> {
-    let file = std::fs::File::open(file)?;
-    let mut archive = ZipArchive::new(file)?;
-    // Iterate through each file in the ZIP archive
-    for i in 0..archive.len() {
-        let file = archive.by_index(i)?;
-        if file.is_file() {
-            let file_name = file.name();
-
-            if file_name.ends_with(".fasta")
-                || file_name.ends_with(".fa")
-                || file_name.ends_with(".fna")
-            {
-                // Process the file (example: pass to process_fasta_file)
-                let reader = StdBufReader::new(file);
-                return process_reader(reader, results);
+        for header_pos in headers2 {
+            if in_sequence {
+                // Process sequence data between last header and this one
+                process_sequence(&combined[last_pos..header_pos], results);
             }
+
+            // Skip the entire header line
+            let header_end = combined[header_pos..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| header_pos + p + 1)
+                .unwrap_or(combined.len());
+
+            last_pos = header_end;
+            in_sequence = true;
+            processed_headers += 1;
         }
-    }
-    Ok(())
-}
 
-fn process_reader<R: Read>(
-    reader: StdBufReader<R>,
-    results: &mut AnalysisResults,
-) -> io::Result<()> {
-    let mut lengths = Vec::with_capacity(250);
-    let mut current_sequence_length = 0;
+        // Process remaining data after last header
+        if in_sequence && last_pos < combined.len() {
+            process_sequence(&combined[last_pos..], results);
+        }
 
-    for line_result in reader.lines() {
-        let line = line_result?;
-        if line.starts_with('>') {
-            if current_sequence_length > 0 {
-                results.total_length += current_sequence_length;
-                results.largest_contig = results.largest_contig.max(current_sequence_length);
-                results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-                lengths.push(current_sequence_length);
-                current_sequence_length = 0;
-            }
-            results.sequence_count += 1;
-        } else {
-            current_sequence_length += process_sequence_line(&line, results);
+        // Update carry_over with unprocessed data
+        carry_over.clear();
+        if !headers.last().is_some_and(|hp| hp >= combined.len()) {
+            carry_over.extend_from_slice(&combined);
         }
     }
 
-    if current_sequence_length > 0 {
-        results.total_length += current_sequence_length;
-        results.largest_contig = results.largest_contig.max(current_sequence_length);
-        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-        lengths.push(current_sequence_length);
-    }
-
-    calc_nq_stats(&lengths, results);
     Ok(())
 }
 
-fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
-    let line = line.trim();
-    let line_bytes = line.as_bytes();
-    results.gc_count += memchr_iter(b'G', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'C', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'g', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'c', line_bytes).count() as usize;
-    results.n_count += memchr_iter(b'N', line_bytes).count() as usize;
-    results.n_count += memchr_iter(b'n', line_bytes).count() as usize;
-    line_bytes.len()
-}
+fn process_sequence(data: &[u8], results: &mut AnalysisResults) {
+    let mut length = 0;
+    let mut gc = 0;
+    let mut n = 0;
 
-fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
-    let total_length: usize = lengths.iter().sum();
-    let mut cumulative_length = 0;
-    let mut sorted_lengths = lengths.to_vec();
+    for &byte in data {
+        match byte {
+            b'>' => break,             // Stop processing if we encounter a new header
+            b'\n' | b'\r' => continue, // Skip newline characters
+            _ => {
+                length += 1;
+                match byte.to_ascii_uppercase() {
+                    b'G' | b'C' => gc += 1,
+                    b'N' => n += 1,
+                    _ => (),
+                }
+            }
+        }
+    }
+
+    if length > 0 {
+        results.sequence_count += 1;
+        results.total_length += length;
+        results.gc_count += gc;
+        results.n_count += n;
+        results.lengths.push(length);
+        results.largest_contig = results.largest_contig.max(length);
+        results.shortest_contig = results.shortest_contig.min(length);
+    }
+}
+fn calc_nq_stats(results: &mut AnalysisResults) {
+    let total_length = results.total_length;
+    let mut sorted_lengths = results.lengths.clone();
     sorted_lengths.sort_unstable_by(|a, b| b.cmp(a));
 
-    for (i, &length) in sorted_lengths.iter().enumerate() {
-        cumulative_length += length;
-        if results.n25 == 0 && cumulative_length >= total_length / 4 {
-            results.n25 = length;
+    let mut cumulative = 0;
+    for (i, &len) in sorted_lengths.iter().enumerate() {
+        cumulative += len;
+
+        if results.n25 == 0 && cumulative >= total_length / 4 {
+            results.n25 = len;
             results.n25_sequence_count = i + 1;
         }
-        if results.n50 == 0 && cumulative_length >= total_length / 2 {
-            results.n50 = length;
+        if results.n50 == 0 && cumulative >= total_length / 2 {
+            results.n50 = len;
             results.n50_sequence_count = i + 1;
         }
-        if results.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
-            results.n75 = length;
+        if cumulative >= total_length * 3 / 4 {
+            results.n75 = len;
             results.n75_sequence_count = i + 1;
             break;
         }
@@ -311,48 +291,29 @@ fn print_results(results: &AnalysisResults) {
     );
 }
 
-async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<()> {
-    let csv_exists = Path::new(csv_filename).exists();
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(csv_filename)
-        .await?;
+fn write_csv(results: &[AnalysisResults], path: &str) -> io::Result<()> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    writeln!(
+        writer,
+        "filename;total_length;sequences;largest_contig;shortest_contig;n50;gc_percent;n_percent"
+    )?;
 
-    if !csv_exists {
-        let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
-        file.write_all(header.as_bytes()).await?;
-    }
-
-    let mut buffer = String::new();
     for result in results {
-        let line = format!(
-            "{};{};{};{:.7};{};{};{};{:.7};{};{:.7}\n",
+        let gc_pct = (result.gc_count as f64 / result.total_length as f64) * 100.0;
+        let n_pct = (result.n_count as f64 / result.total_length as f64) * 100.0;
+        writeln!(
+            writer,
+            "{};{};{};{};{};{};{:.6};{:.6}",
             result.filename,
             result.total_length,
             result.sequence_count,
-            result.total_length as f64 / result.sequence_count as f64,
             result.largest_contig,
             result.shortest_contig,
             result.n50,
-            (result.gc_count as f64 / result.total_length as f64) * 100.0,
-            result.n_count,
-            (result.n_count as f64 / result.total_length as f64) * 100.0,
-        );
-        buffer.push_str(&line);
-
-        // Write in chunks to avoid holding too much in memory
-        if buffer.len() > 64 * 1024 {
-            file.write_all(buffer.as_bytes()).await?;
-            buffer.clear();
-        }
+            gc_pct,
+            n_pct
+        )?;
     }
 
-    if !buffer.is_empty() {
-        file.write_all(buffer.as_bytes()).await?;
-    }
-
-    file.flush().await?;
-    Ok(())
+    writer.flush()
 }
