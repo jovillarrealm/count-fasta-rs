@@ -1,7 +1,6 @@
 use clap::Parser;
 use flate2::read::GzDecoder;
 use futures::stream::{self, StreamExt};
-use memchr::memchr_iter;
 use parking_lot::Mutex;
 use std::env;
 use std::io::{BufRead, BufReader as StdBufReader, Read};
@@ -143,12 +142,14 @@ async fn process_fasta_file(
     buffer_size: usize,
 ) -> io::Result<()> {
     let file = File::open(file).await?;
-    let reader = TokioBufReader::with_capacity(buffer_size, file);
-    let mut lines = reader.lines();
     let mut lengths = Vec::with_capacity(500);
     let mut current_sequence_length = 0;
+    let mut line = String::with_capacity(90);
+    let mut reader = TokioBufReader::with_capacity(buffer_size, file);
+    
+    
 
-    while let Some(line) = lines.next_line().await? {
+    while reader.read_line(&mut line).await? > 0 {
         if line.starts_with('>') {
             if current_sequence_length > 0 {
                 results.total_length += current_sequence_length;
@@ -162,6 +163,7 @@ async fn process_fasta_file(
             let line_len = process_sequence_line(&line, results);
             current_sequence_length += line_len;
         }
+        line.clear();
     }
     if current_sequence_length > 0 {
         results.total_length += current_sequence_length;
@@ -209,14 +211,14 @@ async fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> io::Res
 }
 
 fn process_reader<R: Read>(
-    reader: StdBufReader<R>,
+    mut reader: StdBufReader<R>,
     results: &mut AnalysisResults,
 ) -> io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
+    let mut line = String::with_capacity(90);
 
-    for line_result in reader.lines() {
-        let line = line_result?;
+    while reader.read_line(&mut line)? > 0 {
         if line.starts_with('>') {
             if current_sequence_length > 0 {
                 results.total_length += current_sequence_length;
@@ -229,6 +231,7 @@ fn process_reader<R: Read>(
         } else {
             current_sequence_length += process_sequence_line(&line, results);
         }
+        line.clear();
     }
 
     if current_sequence_length > 0 {
@@ -245,12 +248,17 @@ fn process_reader<R: Read>(
 fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
     let line = line.trim();
     let line_bytes = line.as_bytes();
-    results.gc_count += memchr_iter(b'G', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'C', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'g', line_bytes).count() as usize;
-    results.gc_count += memchr_iter(b'c', line_bytes).count() as usize;
-    results.n_count += memchr_iter(b'N', line_bytes).count() as usize;
-    results.n_count += memchr_iter(b'n', line_bytes).count() as usize;
+    let mut gc_count = 0;
+    let mut n_count = 0;
+    for &byte in line_bytes {
+        match byte {
+            b'G' | b'g' | b'C' | b'c' => gc_count += 1,
+            b'N' | b'n' => n_count += 1,
+            _ => (), // Ignore other characters
+        }
+    }
+    results.gc_count += gc_count;
+    results.n_count += n_count;
     line_bytes.len()
 }
 
