@@ -44,8 +44,16 @@ If the csv file was specified, then the created file will look like this
     filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage
     "GCA_024699835_Aphelenchoides-besseyi_AORJ.fna";46759715;32;1461241.09;18100598;214;16068654;41.78;2900;0.01
 ```
-If you are setting a -d directory, you should probably set a -c csv file to go with it
+
+> [!IMPORTANT]
+> If you are setting a -d directory, you should probably set a -c csv file to go with it
 
 ## Implementation deets
+
+It uses [dist](https://github.com/axodotdev/cargo-dist) as a distribution tool for installation.
+
+> [!IMPORTANT]
+> To modify the installation path, it requires to modify install-path in dist-workspace.toml, and run ci again.
+> `install-path = "CARGO_HOME"`
 
 It uses tokio to handle I/O asynchronously. It uses flate2 to handle gzipped files.
