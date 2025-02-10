@@ -17,6 +17,12 @@ This utility gives some stats on assembly reports
 
 Install the binary for your OS and architecture from the latest [release page](https://github.com/jovillarrealm/count-fasta-rs/releases) , or use the standalone installers. 
 
+Or you can build from source with cargo.
+
+    git clone https://github.com/jovillarrealm/count-fasta-rs
+    cd count-fasta-rs
+    cargo install --path .
+
 ## Usage 
 When a csv file is not specified 
 
