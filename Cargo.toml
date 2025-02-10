@@ -1,7 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.5.5"
-author = "CNSG"
+version = "0.5.6"
 edition = "2021"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
@@ -31,6 +30,3 @@ clap = { version = "4.5.20", features = ["derive"] }
 flate2 = "1.0.34"
 zip = "2.2.0"
 memchr = "2.7.4"
-
-
-#RUSTFLAGS="-C target-feature=+crt-static" cargo build --target x86_64-unknown-linux-gnu --release
