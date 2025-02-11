@@ -1,6 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
@@ -11,11 +11,15 @@ split-debuginfo = '...'  # Platform-specific.
 strip = "none"
 debug-assertions = false
 overflow-checks = false
-lto = false
+lto = true
 panic = 'unwind'
 incremental = false
 codegen-units = 1
 rpath = false
+
+[profile.profiling]
+inherits = "release"
+debug = true
 
 # The profile that 'dist' will build with
 [profile.dist]
@@ -23,10 +27,14 @@ inherits = "release"
 lto = true
 
 [dependencies]
-tokio = { version = "1.40.0", features = ["full"] }
-futures = "0.3.31"
-parking_lot = "0.12.3"
 clap = { version = "4.5.20", features = ["derive"] }
+rayon = "1.8"
 flate2 = "1.0.34"
 zip = "2.2.0"
-memchr = "2.7.4"
+bytecount = "0.6.8"
+xz2 = "0.1"
+bzip2 = "0.5"
+noodles = { version = "0.91.0", features = ["bgzf", "fasta"] }
+noodles-bgzf = "0.36.0"
+noodles-core = "0.16.0"
+noodles-fasta = "0.49.0"

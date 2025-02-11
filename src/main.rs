@@ -1,19 +1,19 @@
 // Licensed under the Apache License, Version 2.0
 // <LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0>
-// at your option. This file may not be copied, modified, 
+// at your option. This file may not be copied, modified,
 // or distributed except according to those terms.
 
 use clap::Parser;
 use flate2::read::GzDecoder;
-use futures::stream::{self, StreamExt};
-use parking_lot::Mutex;
+use rayon::prelude::*;
 use std::env;
-use std::io::{BufRead, BufReader as StdBufReader, Read};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use zip::read::ZipArchive;
+use xz2::read::XzDecoder;
+use bzip2::read::BzDecoder;
+use noodles_bgzf as bgzf;
 
 fn determine_buffer_size() -> usize {
     let default_size = 8 * 1024; // Default to 1kB
@@ -54,38 +54,34 @@ struct AnalysisResults {
     shortest_contig: usize,
 }
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
+fn main() {
     let args = Args::parse();
-
     let mut files_to_process = Vec::new();
 
     if let Some(dir) = args.directory {
-        files_to_process.extend(get_fasta_files_from_directory(&dir).await?);
+        if let Ok(files) = get_fasta_files_from_directory(&dir) {
+            files_to_process.extend(files);
+        }
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
-    let results = process_files(files_to_process).await?;
+    let results = process_files(files_to_process);
 
     if let Some(csv_file) = args.csv {
-        append_to_csv(&results, &csv_file).await?;
+        append_to_csv(&results, &csv_file).expect("Failed to write CSV");
     } else {
         for result in results {
             print_results(&result);
         }
     }
-
-    Ok(())
 }
 
-async fn get_fasta_files_from_directory(dir: &str) -> io::Result<Vec<PathBuf>> {
+fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut entries = tokio::fs::read_dir(dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
         if path.is_file() {
-            let extension = path.extension().and_then(|ext| ext.to_str());
-            if let Some(ext) = extension {
+            if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
                 if ["fa", "fasta", "gz", "zip", "fna"].contains(&ext) {
                     files.push(path);
                 }
@@ -95,119 +91,63 @@ async fn get_fasta_files_from_directory(dir: &str) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-async fn process_files(files: Vec<PathBuf>) -> io::Result<Vec<AnalysisResults>> {
-    let results = Arc::new(Mutex::new(Vec::new()));
-    // Determine the buffer size for reading raw fasta files
+fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     let buffer_size = determine_buffer_size();
-    stream::iter(files)
-        .map(|file| {
-            let results = Arc::clone(&results);
-            async move {
-                let file_str = file.to_str().unwrap().to_string();
-                let mut local_result = AnalysisResults {
-                    filename: Path::new(&file_str)
-                        .file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_string(),
-                    shortest_contig: usize::MAX,
-                    ..Default::default()
-                };
 
-                let result: io::Result<()> = if file_str.ends_with(".gz") {
-                    process_gz_file(&file, &mut local_result).await
-                } else if file_str.ends_with(".zip") {
-                    process_zip_file(&file, &mut local_result).await
-                } else {
-                    process_fasta_file(&file, &mut local_result, buffer_size).await
-                };
+    files
+        .par_iter()
+        .filter_map(|file| {
+            let mut local_result = AnalysisResults {
+                filename: file.file_name().unwrap().to_string_lossy().to_string(),
+                shortest_contig: usize::MAX,
+                ..Default::default()
+            };
 
-                if let Err(e) = result {
-                    eprintln!("Error processing file {}: {}", file_str, e);
-                } else {
-                    results.lock().push(local_result);
-                }
-            }
+            let result = match file.extension()?.to_str()? {
+                "gz" => process_gz_file(file, &mut local_result),
+                "zip" => process_zip_file(file, &mut local_result),
+                "xz" => process_xz_file(file, &mut local_result),
+                "bz2" => process_bz2_file(file, &mut local_result),
+                "bgz" | "bgzip" => process_bgzip_file(file, &mut local_result),
+                "fa" | "fasta" | "fna" => process_fasta_file(file, &mut local_result, buffer_size),
+                _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported file type")),
+            };
+
+            result.ok().map(|_| local_result)
         })
-        .buffer_unordered(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1),
-        )
-        .collect::<Vec<_>>()
-        .await;
-
-    Ok(Arc::try_unwrap(results).unwrap().into_inner())
+        .collect()
 }
 
-async fn process_fasta_file(
+fn process_fasta_file(
     file: &Path,
     results: &mut AnalysisResults,
     buffer_size: usize,
-) -> io::Result<()> {
-    let file = File::open(file).await?;
-    let mut lengths = Vec::with_capacity(500);
-    let mut current_sequence_length = 0;
-    let mut line = String::with_capacity(90);
-    let mut reader = TokioBufReader::with_capacity(buffer_size, file);
-    
-    
-
-    while reader.read_line(&mut line).await? > 0 {
-        if line.starts_with('>') {
-            if current_sequence_length > 0 {
-                results.total_length += current_sequence_length;
-                results.largest_contig = results.largest_contig.max(current_sequence_length);
-                results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-                lengths.push(current_sequence_length);
-                current_sequence_length = 0;
-            }
-            results.sequence_count += 1;
-        } else {
-            let line_len = process_sequence_line(&line, results);
-            current_sequence_length += line_len;
-        }
-        line.clear();
-    }
-    if current_sequence_length > 0 {
-        results.total_length += current_sequence_length;
-        results.largest_contig = results.largest_contig.max(current_sequence_length);
-        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-        lengths.push(current_sequence_length);
-        current_sequence_length = 0;
-    }
-
-    if current_sequence_length > 0 {
-        lengths.push(current_sequence_length);
-    }
-
-    calc_nq_stats(&lengths, results);
-    Ok(())
-}
-
-async fn process_gz_file(file: &Path, results: &mut AnalysisResults) -> io::Result<()> {
-    let file = std::fs::File::open(file)?;
-    let gz = GzDecoder::new(file);
-    let reader = StdBufReader::new(gz);
+) -> std::io::Result<()> {
+    let file = File::open(file)?;
+    let reader = BufReader::with_capacity(buffer_size, file);
     process_reader(reader, results)
 }
 
-async fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> io::Result<()> {
-    let file = std::fs::File::open(file)?;
-    let mut archive = ZipArchive::new(file)?;
-    // Iterate through each file in the ZIP archive
-    for i in 0..archive.len() {
-        let file = archive.by_index(i)?;
-        if file.is_file() {
-            let file_name = file.name();
+fn process_gz_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+    let file = File::open(file)?;
+    let gz = GzDecoder::new(file);
+    let reader = BufReader::new(gz);
+    process_reader(reader, results)
+}
 
+fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+    let file = File::open(file)?;
+    let buf_reader = BufReader::new(file);
+    let mut archive = ZipArchive::new(buf_reader)?;
+    for i in 0..archive.len() {
+        let mut zip_file = archive.by_index(i)?;
+        if zip_file.is_file() {
+            let file_name = zip_file.name();
             if file_name.ends_with(".fasta")
                 || file_name.ends_with(".fa")
                 || file_name.ends_with(".fna")
             {
-                // Process the file (example: pass to process_fasta_file)
-                let reader = StdBufReader::new(file);
+                let reader = BufReader::new(&mut zip_file);
                 return process_reader(reader, results);
             }
         }
@@ -216,15 +156,15 @@ async fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> io::Res
 }
 
 fn process_reader<R: Read>(
-    mut reader: StdBufReader<R>,
+    mut reader: BufReader<R>,
     results: &mut AnalysisResults,
-) -> io::Result<()> {
+) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
-    let mut line = String::with_capacity(90);
+    let mut line = Vec::with_capacity(128);
 
-    while reader.read_line(&mut line)? > 0 {
-        if line.starts_with('>') {
+    while reader.read_until(b'\n', &mut line)? > 0 {
+        if line.first() == Some(&b'>') {
             if current_sequence_length > 0 {
                 results.total_length += current_sequence_length;
                 results.largest_contig = results.largest_contig.max(current_sequence_length);
@@ -250,21 +190,17 @@ fn process_reader<R: Read>(
     Ok(())
 }
 
-fn process_sequence_line(line: &str, results: &mut AnalysisResults) -> usize {
-    let line = line.trim();
-    let line_bytes = line.as_bytes();
-    let mut gc_count = 0;
-    let mut n_count = 0;
-    for &byte in line_bytes {
-        match byte {
-            b'G' | b'g' | b'C' | b'c' => gc_count += 1,
-            b'N' | b'n' => n_count += 1,
-            _ => (), // Ignore other characters
-        }
+fn process_sequence_line(line: &[u8], results: &mut AnalysisResults) -> usize {
+    results.gc_count += bytecount::count(line, b'G')
+        + bytecount::count(line, b'g')
+        + bytecount::count(line, b'C')
+        + bytecount::count(line, b'c');
+    results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
+    if line.ends_with(b"\n") {
+        line.len() - 1 // Exclude the newline character
+    } else {
+        line.len()
     }
-    results.gc_count += gc_count;
-    results.n_count += n_count;
-    line_bytes.len()
 }
 
 fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
@@ -324,18 +260,16 @@ fn print_results(results: &AnalysisResults) {
     );
 }
 
-async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<()> {
+fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<()> {
     let csv_exists = Path::new(csv_filename).exists();
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(csv_filename)
-        .await?;
+        .open(csv_filename)?;
 
     if !csv_exists {
         let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
-        file.write_all(header.as_bytes()).await?;
+        file.write_all(header.as_bytes())?;
     }
 
     let mut buffer = String::new();
@@ -357,15 +291,45 @@ async fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::R
 
         // Write in chunks to avoid holding too much in memory
         if buffer.len() > 64 * 1024 {
-            file.write_all(buffer.as_bytes()).await?;
+            file.write_all(buffer.as_bytes())?;
             buffer.clear();
         }
     }
 
     if !buffer.is_empty() {
-        file.write_all(buffer.as_bytes()).await?;
+        file.write_all(buffer.as_bytes())?;
     }
 
-    file.flush().await?;
+    file.flush()?;
     Ok(())
 }
+
+fn process_xz_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+    let file = File::open(file)?;
+    let xz = XzDecoder::new(file);
+    let reader = BufReader::new(xz);
+    process_reader(reader, results)
+}
+
+
+fn process_bz2_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+    let file = File::open(file)?;
+    let bz = BzDecoder::new(file);
+    let reader = BufReader::new(bz);
+    process_reader(reader, results)
+}
+
+
+
+fn process_bgzip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+    let file = File::open(file)?;
+    let mut reader = bgzf::Reader::new(file);
+    let mut buffer = Vec::new();
+    
+    // Read entire decompressed content
+    reader.read_to_end(&mut buffer)?;
+    
+    let reader = BufReader::new(&buffer[..]);
+    process_reader(reader, results)
+}
+
