@@ -8,6 +8,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use noodles_bgzf as bgzf;
 use rayon::prelude::*;
+use std::cmp::max;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -15,13 +16,14 @@ use std::path::{Path, PathBuf};
 use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
 extern crate bytecount;
+extern crate num_cpus;
 
 fn determine_buffer_size() -> usize {
-    let default_size = 8 * 1024; // Default to 1kB
-    let max_size = 10 * 1024 * 1024; // Cap at 10MB
+    const DEFAULT_SIZE:usize = 5 * 1024 * 1024; // Default to 1MB
+    const MAX_SIZE: usize = 10 * 1024 * 1024; // Cap at 10MB
     match env::var("BUFFER_SIZE") {
-        Ok(val) => val.parse().unwrap_or(default_size).min(max_size),
-        Err(_) => default_size,
+        Ok(val) => val.parse().unwrap_or(DEFAULT_SIZE).min(MAX_SIZE),
+        Err(_) => DEFAULT_SIZE,
     }
 }
 
@@ -69,7 +71,7 @@ fn main() {
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
     let results = process_files(files_to_process);
-
+    
     if let Some(csv_file) = args.csv {
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
     } else {
@@ -78,10 +80,10 @@ fn main() {
         }
     }
 }
-const VALID_FILES: [&str;3] = ["fa", "fasta", "fna"];
+const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
 fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    
+
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_file() {
@@ -90,7 +92,6 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
                     files.push(path);
                 } else if ["gz", "xz", "bz2", "bgz", "bgzip", "zip"].contains(&ext) {
                     path.clone().file_name().and_then(|osf_name| {
-
                         osf_name.to_str().and_then(|f_name| {
                             VALID_FILES
                                 .iter()
@@ -107,32 +108,41 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 
 fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     let buffer_size = determine_buffer_size();
+    let available_threads = max(2, (num_cpus::get() as f32 * 0.9).round() as usize);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(available_threads)
+        .stack_size(1024 * 1024)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        files
+            .par_iter()
+            .filter_map(|file| {
+                let mut local_result = AnalysisResults {
+                    filename: file.file_name().unwrap().to_string_lossy().to_string(),
+                    shortest_contig: usize::MAX,
+                    ..Default::default()
+                };
 
-    files
-        .par_iter()
-        .filter_map(|file| {
-            let mut local_result = AnalysisResults {
-                filename: file.file_name().unwrap().to_string_lossy().to_string(),
-                shortest_contig: usize::MAX,
-                ..Default::default()
-            };
+                let result = match file.extension()?.to_str()? {
+                    "gz" => process_gz_file(file, &mut local_result, buffer_size),
+                    "zip" => process_zip_file(file, &mut local_result, buffer_size),
+                    "xz" => process_xz_file(file, &mut local_result, buffer_size),
+                    "bz2" => process_bz2_file(file, &mut local_result, buffer_size),
+                    "bgz" | "bgzip" => process_bgzip_file(file, &mut local_result, buffer_size),
+                    ext if VALID_FILES.contains(&ext) => {
+                        process_fasta_file(file, &mut local_result, buffer_size)
+                    }
+                    _ => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Unsupported file type",
+                    )),
+                };
 
-            let result = match file.extension()?.to_str()? {
-                "gz" => process_gz_file(file, &mut local_result),
-                "zip" => process_zip_file(file, &mut local_result),
-                "xz" => process_xz_file(file, &mut local_result),
-                "bz2" => process_bz2_file(file, &mut local_result),
-                "bgz" | "bgzip" => process_bgzip_file(file, &mut local_result),
-                ext if VALID_FILES.contains(&ext) => process_fasta_file(file, &mut local_result, buffer_size),
-                _ => Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Unsupported file type",
-                )),
-            };
-
-            result.ok().map(|_| local_result)
-        })
-        .collect()
+                result.ok().map(|_| local_result)
+            })
+            .collect()
+    })
 }
 
 fn process_fasta_file(
@@ -145,24 +155,27 @@ fn process_fasta_file(
     process_reader(reader, results)
 }
 
-fn process_gz_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+fn process_gz_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
     let file = File::open(file)?;
     let gz = GzDecoder::new(file);
-    let reader = BufReader::new(gz);
+    let reader = BufReader::with_capacity(buffer_size, gz);
     process_reader(reader, results)
 }
 
-fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+fn process_zip_file(
+    file: &Path,
+    results: &mut AnalysisResults,
+    buffer_size: usize,
+) -> std::io::Result<()> {
     let file = File::open(file)?;
-    let buf_reader = BufReader::new(file);
+    let buf_reader = BufReader::with_capacity(buffer_size, file);
     let mut archive = ZipArchive::new(buf_reader)?;
     for i in 0..archive.len() {
         let mut zip_file = archive.by_index(i)?;
         if zip_file.is_file() {
             let file_name = zip_file.name();
-            if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext))
-            {
-                let reader = BufReader::new(&mut zip_file);
+            if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
+                let reader = BufReader::with_capacity(buffer_size, &mut zip_file);
                 return process_reader(reader, results);
             }
         }
@@ -319,21 +332,21 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
     Ok(())
 }
 
-fn process_xz_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+fn process_xz_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
     let file = File::open(file)?;
     let xz = XzDecoder::new(file);
-    let reader = BufReader::new(xz);
+    let reader = BufReader::with_capacity(buffer_size,xz);
     process_reader(reader, results)
 }
 
-fn process_bz2_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+fn process_bz2_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
     let file = File::open(file)?;
     let bz = BzDecoder::new(file);
-    let reader = BufReader::new(bz);
+    let reader = BufReader::with_capacity(buffer_size, bz);
     process_reader(reader, results)
 }
 
-fn process_bgzip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
+fn process_bgzip_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
     let file = File::open(file)?;
     let mut reader = bgzf::Reader::new(file);
     let mut buffer = Vec::new();
@@ -341,6 +354,6 @@ fn process_bgzip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Re
     // Read entire decompressed content
     reader.read_to_end(&mut buffer)?;
 
-    let reader = BufReader::new(&buffer[..]);
+    let reader = BufReader::with_capacity(buffer_size, &buffer[..]);
     process_reader(reader, results)
 }
