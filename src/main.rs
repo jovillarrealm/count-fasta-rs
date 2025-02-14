@@ -8,7 +8,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use noodles_bgzf as bgzf;
 use rayon::prelude::*;
-use std::cmp::max;
+use std::cmp::{max, min};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -19,7 +19,7 @@ extern crate bytecount;
 extern crate num_cpus;
 
 fn determine_buffer_size() -> usize {
-    const DEFAULT_SIZE:usize = 5 * 1024 * 1024; // Default to 1MB
+    const DEFAULT_SIZE: usize = 5 * 1024 * 1024; // Default to 1MB
     const MAX_SIZE: usize = 10 * 1024 * 1024; // Cap at 10MB
     match env::var("BUFFER_SIZE") {
         Ok(val) => val.parse().unwrap_or(DEFAULT_SIZE).min(MAX_SIZE),
@@ -71,7 +71,7 @@ fn main() {
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
     let results = process_files(files_to_process);
-    
+
     if let Some(csv_file) = args.csv {
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
     } else {
@@ -108,7 +108,11 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 
 fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     let buffer_size = determine_buffer_size();
-    let available_threads = max(2, (num_cpus::get() as f32 * 0.9).round() as usize);
+    let usable_threads = (num_cpus::get() as f32 * 0.9).round() as usize;
+    let available_threads = max(
+        1,
+        min(usable_threads, files.len()),
+    );
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .stack_size(1024 * 1024)
@@ -155,7 +159,11 @@ fn process_fasta_file(
     process_reader(reader, results)
 }
 
-fn process_gz_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
+fn process_gz_file(
+    file: &Path,
+    results: &mut AnalysisResults,
+    buffer_size: usize,
+) -> std::io::Result<()> {
     let file = File::open(file)?;
     let gz = GzDecoder::new(file);
     let reader = BufReader::with_capacity(buffer_size, gz);
@@ -227,7 +235,7 @@ fn process_sequence_line(line: &[u8], results: &mut AnalysisResults) -> usize {
     if line.ends_with(b"\n") {
         line.len() - 1 // Exclude the newline character
     } else if line.ends_with(b"\r\n") {
-        line.len() -2 // Exclude the newline characters
+        line.len() - 2 // Exclude the newline characters
     } else {
         line.len()
     }
@@ -334,21 +342,33 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
     Ok(())
 }
 
-fn process_xz_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
+fn process_xz_file(
+    file: &Path,
+    results: &mut AnalysisResults,
+    buffer_size: usize,
+) -> std::io::Result<()> {
     let file = File::open(file)?;
     let xz = XzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size,xz);
+    let reader = BufReader::with_capacity(buffer_size, xz);
     process_reader(reader, results)
 }
 
-fn process_bz2_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
+fn process_bz2_file(
+    file: &Path,
+    results: &mut AnalysisResults,
+    buffer_size: usize,
+) -> std::io::Result<()> {
     let file = File::open(file)?;
     let bz = BzDecoder::new(file);
     let reader = BufReader::with_capacity(buffer_size, bz);
     process_reader(reader, results)
 }
 
-fn process_bgzip_file(file: &Path, results: &mut AnalysisResults, buffer_size: usize) -> std::io::Result<()> {
+fn process_bgzip_file(
+    file: &Path,
+    results: &mut AnalysisResults,
+    buffer_size: usize,
+) -> std::io::Result<()> {
     let file = File::open(file)?;
     let mut reader = bgzf::Reader::new(file);
     let mut buffer = Vec::new();
