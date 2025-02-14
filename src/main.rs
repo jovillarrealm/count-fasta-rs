@@ -3,17 +3,17 @@
 // at your option. This file may not be copied, modified,
 // or distributed except according to those terms.
 
+use bzip2::read::BzDecoder;
 use clap::Parser;
 use flate2::read::GzDecoder;
+use noodles_bgzf as bgzf;
 use rayon::prelude::*;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use zip::read::ZipArchive;
 use xz2::read::XzDecoder;
-use bzip2::read::BzDecoder;
-use noodles_bgzf as bgzf;
+use zip::read::ZipArchive;
 
 fn determine_buffer_size() -> usize {
     let default_size = 8 * 1024; // Default to 1kB
@@ -33,7 +33,9 @@ struct Args {
     #[clap(short, long)]
     directory: Option<String>,
 
-    #[clap(name = "FASTA FILE (.fa .fasta .fna .zip .gz)")]
+    #[clap(
+        name = "FASTA FILE (.fa .fasta .fna .zip(multi file archive) .gz .xz .bz2 .bgz .bgzip)"
+    )]
     files: Vec<String>,
 }
 
@@ -75,19 +77,31 @@ fn main() {
         }
     }
 }
-
+const VALID_FILES: [&str;3] = ["fa", "fasta", "fna"];
 fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
+    
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-                if ["fa", "fasta", "gz", "zip", "fna"].contains(&ext) {
+                if VALID_FILES.contains(&ext) {
                     files.push(path);
+                } else if ["gz", "xz", "bz2", "bgz", "bgzip", "zip"].contains(&ext) {
+                    path.clone().file_name().and_then(|osf_name| {
+
+                        osf_name.to_str().and_then(|f_name| {
+                            VALID_FILES
+                                .iter()
+                                .any(|&v| f_name.contains(v))
+                                .then(|| files.push(path.into()))
+                        })
+                    });
                 }
             }
         }
     }
+    println!("{:#?}", files);
     Ok(files)
 }
 
@@ -109,8 +123,11 @@ fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
                 "xz" => process_xz_file(file, &mut local_result),
                 "bz2" => process_bz2_file(file, &mut local_result),
                 "bgz" | "bgzip" => process_bgzip_file(file, &mut local_result),
-                "fa" | "fasta" | "fna" => process_fasta_file(file, &mut local_result, buffer_size),
-                _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unsupported file type")),
+                ext if VALID_FILES.contains(&ext) => process_fasta_file(file, &mut local_result, buffer_size),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Unsupported file type",
+                )),
             };
 
             result.ok().map(|_| local_result)
@@ -143,9 +160,7 @@ fn process_zip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Resu
         let mut zip_file = archive.by_index(i)?;
         if zip_file.is_file() {
             let file_name = zip_file.name();
-            if file_name.ends_with(".fasta")
-                || file_name.ends_with(".fa")
-                || file_name.ends_with(".fna")
+            if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext))
             {
                 let reader = BufReader::new(&mut zip_file);
                 return process_reader(reader, results);
@@ -311,7 +326,6 @@ fn process_xz_file(file: &Path, results: &mut AnalysisResults) -> std::io::Resul
     process_reader(reader, results)
 }
 
-
 fn process_bz2_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
     let file = File::open(file)?;
     let bz = BzDecoder::new(file);
@@ -319,17 +333,14 @@ fn process_bz2_file(file: &Path, results: &mut AnalysisResults) -> std::io::Resu
     process_reader(reader, results)
 }
 
-
-
 fn process_bgzip_file(file: &Path, results: &mut AnalysisResults) -> std::io::Result<()> {
     let file = File::open(file)?;
     let mut reader = bgzf::Reader::new(file);
     let mut buffer = Vec::new();
-    
+
     // Read entire decompressed content
     reader.read_to_end(&mut buffer)?;
-    
+
     let reader = BufReader::new(&buffer[..]);
     process_reader(reader, results)
 }
-
