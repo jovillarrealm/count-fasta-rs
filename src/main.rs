@@ -96,7 +96,7 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
                             VALID_FILES
                                 .iter()
                                 .any(|&v| f_name.contains(v))
-                                .then(|| files.push(path.into()))
+                                .then(|| files.push(path))
                         })
                     });
                 }
