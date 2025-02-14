@@ -226,6 +226,8 @@ fn process_sequence_line(line: &[u8], results: &mut AnalysisResults) -> usize {
     results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
     if line.ends_with(b"\n") {
         line.len() - 1 // Exclude the newline character
+    } else if line.ends_with(b"\r\n") {
+        line.len() -2 // Exclude the newline characters
     } else {
         line.len()
     }
