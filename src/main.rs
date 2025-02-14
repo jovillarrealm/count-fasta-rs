@@ -8,7 +8,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use noodles_bgzf as bgzf;
 use rayon::prelude::*;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -109,7 +109,7 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     let buffer_size = determine_buffer_size();
     let usable_threads = (num_cpus::get() as f32 * 0.9).round() as usize;
-    let available_threads = max(1, min(usable_threads, files.len()));
+    let available_threads = min(usable_threads, files.len());
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .stack_size(1024 * 1024)
