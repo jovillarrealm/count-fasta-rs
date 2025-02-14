@@ -195,36 +195,36 @@ fn process_reader<R: Read>(
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
     let mut line = Vec::with_capacity(128);
-    let offset ;
+    let offset;
+
     if reader.read_until(b'\n', &mut line)? > 0 {
         results.sequence_count += 1;
+        //Assuming the first line is a header line and starts with '>'
         offset = {
             if line.ends_with(b"\r\n") {
                 Some(2) // Exclude the newline character
             } else if line.ends_with(b"\n") {
                 Some(1) // Exclude the newline characters
             } else {
-                None
+                None // No newline characters?
             }
         };
         line.clear();
     } else {
-        return Ok(());
+        return Ok(()); // Nothing read from the file
     };
     let Some(offset) = offset else {
-        return Ok(());
-    }; 
-
+        return Ok(()); // No newline characters?
+    };
 
     while reader.read_until(b'\n', &mut line)? > 0 {
+        // Already processed the first line
         if line.first() == Some(&b'>') {
-            if current_sequence_length > 0 {
-                results.total_length += current_sequence_length;
-                results.largest_contig = results.largest_contig.max(current_sequence_length);
-                results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-                lengths.push(current_sequence_length);
-                current_sequence_length = 0;
-            }
+            results.total_length += current_sequence_length;
+            results.largest_contig = results.largest_contig.max(current_sequence_length);
+            results.shortest_contig = results.shortest_contig.min(current_sequence_length);
+            lengths.push(current_sequence_length);
+            current_sequence_length = 0;
             results.sequence_count += 1;
         } else {
             current_sequence_length += process_sequence_line(&line, results, offset);
