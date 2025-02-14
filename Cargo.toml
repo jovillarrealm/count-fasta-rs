@@ -1,6 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
@@ -11,7 +11,7 @@ split-debuginfo = '...'  # Platform-specific.
 strip = "none"
 debug-assertions = false
 overflow-checks = false
-lto = true
+lto = false
 panic = 'unwind'
 incremental = false
 codegen-units = 1
@@ -34,7 +34,6 @@ zip = "2.2.0"
 bytecount = "0.6.8"
 xz2 = "0.1"
 bzip2 = "0.5"
-noodles = { version = "0.91.0", features = ["bgzf", "fasta"] }
+noodles = { version = "0.91.0", features = ["bgzf"] }
 noodles-bgzf = "0.36.0"
 noodles-core = "0.16.0"
-noodles-fasta = "0.49.0"

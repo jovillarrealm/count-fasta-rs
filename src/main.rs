@@ -14,6 +14,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
+extern crate bytecount;
 
 fn determine_buffer_size() -> usize {
     let default_size = 8 * 1024; // Default to 1kB
@@ -101,7 +102,6 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
             }
         }
     }
-    println!("{:#?}", files);
     Ok(files)
 }
 
