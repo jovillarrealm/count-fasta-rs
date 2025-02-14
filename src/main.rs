@@ -109,10 +109,7 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     let buffer_size = determine_buffer_size();
     let usable_threads = (num_cpus::get() as f32 * 0.9).round() as usize;
-    let available_threads = max(
-        1,
-        min(usable_threads, files.len()),
-    );
+    let available_threads = max(1, min(usable_threads, files.len()));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .stack_size(1024 * 1024)
@@ -198,6 +195,26 @@ fn process_reader<R: Read>(
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
     let mut line = Vec::with_capacity(128);
+    let offset ;
+    if reader.read_until(b'\n', &mut line)? > 0 {
+        results.sequence_count += 1;
+        offset = {
+            if line.ends_with(b"\r\n") {
+                Some(2) // Exclude the newline character
+            } else if line.ends_with(b"\n") {
+                Some(1) // Exclude the newline characters
+            } else {
+                None
+            }
+        };
+        line.clear();
+    } else {
+        return Ok(());
+    };
+    let Some(offset) = offset else {
+        return Ok(());
+    }; 
+
 
     while reader.read_until(b'\n', &mut line)? > 0 {
         if line.first() == Some(&b'>') {
@@ -210,7 +227,7 @@ fn process_reader<R: Read>(
             }
             results.sequence_count += 1;
         } else {
-            current_sequence_length += process_sequence_line(&line, results);
+            current_sequence_length += process_sequence_line(&line, results, offset);
         }
         line.clear();
     }
@@ -226,16 +243,14 @@ fn process_reader<R: Read>(
     Ok(())
 }
 
-fn process_sequence_line(line: &[u8], results: &mut AnalysisResults) -> usize {
+fn process_sequence_line(line: &[u8], results: &mut AnalysisResults, offset: usize) -> usize {
     results.gc_count += bytecount::count(line, b'G')
         + bytecount::count(line, b'g')
         + bytecount::count(line, b'C')
         + bytecount::count(line, b'c');
     results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
     if line.ends_with(b"\n") {
-        line.len() - 1 // Exclude the newline character
-    } else if line.ends_with(b"\r\n") {
-        line.len() - 2 // Exclude the newline characters
+        line.len() - offset // Exclude the newline character
     } else {
         line.len()
     }
