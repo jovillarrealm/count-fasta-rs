@@ -328,11 +328,11 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
     let mut buffer = String::new();
     for result in results {
         let line = format!(
-            "{};{};{};{:.7};{};{};{};{:.7};{};{:.7}\n",
+            "{};{};{};{};{};{};{};{:.7};{};{:.7}\n",
             result.filename,
             result.total_length,
             result.sequence_count,
-            result.total_length as f64 / result.sequence_count as f64,
+            (result.total_length as f64 / result.sequence_count as f64).round() as usize,
             result.largest_contig,
             result.shortest_contig,
             result.n50,
