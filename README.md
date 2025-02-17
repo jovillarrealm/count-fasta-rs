@@ -62,4 +62,6 @@ It uses [dist](https://github.com/axodotdev/cargo-dist) as a distribution tool f
 > To modify the installation path, it requires to modify install-path in dist-workspace.toml, and run ci again.
 > `install-path = "CARGO_HOME"`
 
-
+> [!NOTE]
+> Known Bug:
+> .gz files that were compressed with bgzip are read incorrectly.

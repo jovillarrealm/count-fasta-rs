@@ -125,7 +125,9 @@ fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
                     "xz" => process_xz_file(file, buffer_size).unwrap_or_default(),
                     "bz2" => process_bz2_file(file, buffer_size).unwrap_or_default(),
                     "bgz" | "bgzip" => process_bgzip_file(file, buffer_size).unwrap_or_default(),
-                    _ if VALID_FILES.contains(&ext) => process_fasta_file(file, buffer_size).unwrap_or_default(),
+                    _ if VALID_FILES.contains(&ext) => {
+                        process_fasta_file(file, buffer_size).unwrap_or_default()
+                    }
                     _ => Vec::new(),
                 }
             })
@@ -133,10 +135,7 @@ fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     })
 }
 
-fn process_fasta_file(
-    file: &Path,
-    buffer_size: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+fn process_fasta_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
         filename: file.file_name().unwrap().to_string_lossy().to_string(),
         shortest_contig: usize::MAX,
@@ -148,10 +147,7 @@ fn process_fasta_file(
     Ok(vec![results])
 }
 
-fn process_gz_file(
-    file: &Path,
-    buffer_size: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+fn process_gz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
         filename: file.file_name().unwrap().to_string_lossy().to_string(),
         shortest_contig: usize::MAX,
@@ -164,10 +160,7 @@ fn process_gz_file(
     Ok(vec![results])
 }
 
-fn process_zip_file(
-    file: &Path,
-    buffer_size: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let file = File::open(file)?;
     let buf_reader = BufReader::with_capacity(buffer_size, file);
     let mut archive = ZipArchive::new(buf_reader)?;
@@ -365,10 +358,7 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
     Ok(())
 }
 
-fn process_xz_file(
-    file: &Path,
-    buffer_size: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
         filename: file.file_name().unwrap().to_string_lossy().to_string(),
         shortest_contig: usize::MAX,
@@ -381,10 +371,7 @@ fn process_xz_file(
     Ok(vec![results])
 }
 
-fn process_bz2_file(
-    file: &Path,
-    buffer_size: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+fn process_bz2_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
         filename: file.file_name().unwrap().to_string_lossy().to_string(),
         shortest_contig: usize::MAX,
@@ -397,10 +384,7 @@ fn process_bz2_file(
     Ok(vec![results])
 }
 
-fn process_bgzip_file(
-    file: &Path,
-    buffer_size: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+fn process_bgzip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
         filename: file.file_name().unwrap().to_string_lossy().to_string(),
         shortest_contig: usize::MAX,
@@ -418,4 +402,28 @@ fn process_bgzip_file(
     Ok(vec![results])
 }
 
+#[cfg(test)]
+mod tests {
+    use std::fs;
 
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let mut files_to_process = Vec::new();
+
+        if let Ok(files) = get_fasta_files_from_directory(&"./test/") {
+            files_to_process.extend(files);
+        }
+
+        let results = process_files(files_to_process);
+
+        let csv_file = "test/attempt.csv";
+
+        append_to_csv(&results, &csv_file).expect("Failed to write CSV");
+        let thing=fs::read_to_string("test/test.csv").unwrap();
+        let compare=fs::read_to_string(csv_file).unwrap();
+        assert_eq!(thing,compare);
+        let _ = fs::remove_file(csv_file);
+    }
+}
