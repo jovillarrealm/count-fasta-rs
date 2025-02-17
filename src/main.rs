@@ -91,14 +91,15 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
                 if VALID_FILES.contains(&ext) {
                     files.push(path);
                 } else if ["gz", "xz", "bz2", "bgz", "bgzip", "zip"].contains(&ext) {
-                    path.clone().file_name().and_then(|osf_name| {
-                        osf_name.to_str().and_then(|f_name| {
-                            VALID_FILES
-                                .iter()
-                                .any(|&v| f_name.contains(v))
-                                .then(|| files.push(path))
-                        })
-                    });
+                    //path.clone().file_name().and_then(|osf_name| {
+                    //    osf_name.to_str().and_then(|f_name| {
+                    //        VALID_FILES
+                    //        .iter()
+                    //        .any(|&v| f_name.contains(v))
+                    //        .then(|| files.push(path))
+                    //    })
+                    //});
+                    files.push(path);
                 }
             }
         }
