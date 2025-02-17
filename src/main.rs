@@ -173,7 +173,7 @@ fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<Anal
             let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
                 let mut result = AnalysisResults {
-                    filename: file_name.clone(),
+                    filename: Path::new(&file_name).file_name().unwrap().to_string_lossy().to_string(),
                     shortest_contig: usize::MAX,
                     ..Default::default()
                 };
