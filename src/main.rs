@@ -112,35 +112,22 @@ fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
     let available_threads = min(usable_threads, files.len());
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
-        .stack_size(1024 * 1024)
         .build()
         .unwrap();
     pool.install(|| {
         files
             .par_iter()
-            .filter_map(|file| {
-                let mut local_result = AnalysisResults {
-                    filename: file.file_name().unwrap().to_string_lossy().to_string(),
-                    shortest_contig: usize::MAX,
-                    ..Default::default()
-                };
-
-                let result = match file.extension()?.to_str()? {
-                    "gz" => process_gz_file(file, &mut local_result, buffer_size),
-                    "zip" => process_zip_file(file, &mut local_result, buffer_size),
-                    "xz" => process_xz_file(file, &mut local_result, buffer_size),
-                    "bz2" => process_bz2_file(file, &mut local_result, buffer_size),
-                    "bgz" | "bgzip" => process_bgzip_file(file, &mut local_result, buffer_size),
-                    ext if VALID_FILES.contains(&ext) => {
-                        process_fasta_file(file, &mut local_result, buffer_size)
-                    }
-                    _ => Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Unsupported file type",
-                    )),
-                };
-
-                result.ok().map(|_| local_result)
+            .flat_map(|file| {
+                let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+                match ext {
+                    "gz" => process_gz_file(file, buffer_size).unwrap_or_default(),
+                    "zip" => process_zip_file(file, buffer_size).unwrap_or_default(),
+                    "xz" => process_xz_file(file, buffer_size).unwrap_or_default(),
+                    "bz2" => process_bz2_file(file, buffer_size).unwrap_or_default(),
+                    "bgz" | "bgzip" => process_bgzip_file(file, buffer_size).unwrap_or_default(),
+                    _ if VALID_FILES.contains(&ext) => process_fasta_file(file, buffer_size).unwrap_or_default(),
+                    _ => Vec::new(),
+                }
             })
             .collect()
     })
@@ -148,44 +135,65 @@ fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
 
 fn process_fasta_file(
     file: &Path,
-    results: &mut AnalysisResults,
     buffer_size: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<AnalysisResults>> {
+    let mut results = AnalysisResults {
+        filename: file.file_name().unwrap().to_string_lossy().to_string(),
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
     let file = File::open(file)?;
     let reader = BufReader::with_capacity(buffer_size, file);
-    process_reader(reader, results)
+    process_reader(reader, &mut results)?;
+    Ok(vec![results])
 }
 
 fn process_gz_file(
     file: &Path,
-    results: &mut AnalysisResults,
     buffer_size: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<AnalysisResults>> {
+    let mut results = AnalysisResults {
+        filename: file.file_name().unwrap().to_string_lossy().to_string(),
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
     let file = File::open(file)?;
     let gz = GzDecoder::new(file);
     let reader = BufReader::with_capacity(buffer_size, gz);
-    process_reader(reader, results)
+    process_reader(reader, &mut results)?;
+    Ok(vec![results])
 }
 
 fn process_zip_file(
     file: &Path,
-    results: &mut AnalysisResults,
     buffer_size: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<AnalysisResults>> {
     let file = File::open(file)?;
     let buf_reader = BufReader::with_capacity(buffer_size, file);
     let mut archive = ZipArchive::new(buf_reader)?;
+    let mut all_results = Vec::new();
+
     for i in 0..archive.len() {
-        let mut zip_file = archive.by_index(i)?;
+        let zip_file = archive.by_index(i)?;
         if zip_file.is_file() {
-            let file_name = zip_file.name();
+            let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
-                let reader = BufReader::with_capacity(buffer_size, &mut zip_file);
-                return process_reader(reader, results);
+                let mut result = AnalysisResults {
+                    filename: file_name.clone(),
+                    shortest_contig: usize::MAX,
+                    ..Default::default()
+                };
+                let reader = BufReader::with_capacity(buffer_size, zip_file);
+                if let Err(e) = process_reader(reader, &mut result) {
+                    eprintln!("Error processing {}: {}", file_name, e);
+                    continue; // Skip this file but continue processing others
+                };
+                all_results.push(result);
             }
         }
     }
-    Ok(())
+
+    Ok(all_results)
 }
 
 fn process_reader<R: Read>(
@@ -359,31 +367,45 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
 
 fn process_xz_file(
     file: &Path,
-    results: &mut AnalysisResults,
     buffer_size: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<AnalysisResults>> {
+    let mut results = AnalysisResults {
+        filename: file.file_name().unwrap().to_string_lossy().to_string(),
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
     let file = File::open(file)?;
     let xz = XzDecoder::new(file);
     let reader = BufReader::with_capacity(buffer_size, xz);
-    process_reader(reader, results)
+    process_reader(reader, &mut results)?;
+    Ok(vec![results])
 }
 
 fn process_bz2_file(
     file: &Path,
-    results: &mut AnalysisResults,
     buffer_size: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<AnalysisResults>> {
+    let mut results = AnalysisResults {
+        filename: file.file_name().unwrap().to_string_lossy().to_string(),
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
     let file = File::open(file)?;
     let bz = BzDecoder::new(file);
     let reader = BufReader::with_capacity(buffer_size, bz);
-    process_reader(reader, results)
+    process_reader(reader, &mut results)?;
+    Ok(vec![results])
 }
 
 fn process_bgzip_file(
     file: &Path,
-    results: &mut AnalysisResults,
     buffer_size: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<AnalysisResults>> {
+    let mut results = AnalysisResults {
+        filename: file.file_name().unwrap().to_string_lossy().to_string(),
+        shortest_contig: usize::MAX,
+        ..Default::default()
+    };
     let file = File::open(file)?;
     let mut reader = bgzf::Reader::new(file);
     let mut buffer = Vec::new();
@@ -392,5 +414,8 @@ fn process_bgzip_file(
     reader.read_to_end(&mut buffer)?;
 
     let reader = BufReader::with_capacity(buffer_size, &buffer[..]);
-    process_reader(reader, results)
+    process_reader(reader, &mut results)?;
+    Ok(vec![results])
 }
+
+

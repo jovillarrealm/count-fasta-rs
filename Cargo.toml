@@ -1,6 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.5.10"
+version = "0.6.0"
 edition = "2021"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
@@ -38,3 +38,4 @@ noodles = { version = "0.91.0", features = ["bgzf"] }
 noodles-bgzf = "0.36.0"
 noodles-core = "0.16.0"
 num_cpus = "1.16.0"
+sevenz-rust={version="0.6.1", features=["bzip2", "zstd"]}
