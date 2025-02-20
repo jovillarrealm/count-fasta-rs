@@ -173,7 +173,11 @@ fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<Anal
             let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
                 let mut result = AnalysisResults {
-                    filename: Path::new(&file_name).file_name().unwrap().to_string_lossy().to_string(),
+                    filename: Path::new(&file_name)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
                     shortest_contig: usize::MAX,
                     ..Default::default()
                 };
@@ -422,9 +426,9 @@ mod tests {
         let csv_file = "test/attempt.csv";
 
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
-        let thing=fs::read_to_string("test/test.csv").unwrap();
-        let compare=fs::read_to_string(csv_file).unwrap();
-        assert_eq!(thing,compare);
+        let thing = fs::read_to_string("test/test.csv").unwrap();
+        let compare = fs::read_to_string(csv_file).unwrap();
+        assert_eq!(thing, compare);
         let _ = fs::remove_file(csv_file);
     }
 }
