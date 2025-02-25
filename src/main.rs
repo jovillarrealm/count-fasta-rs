@@ -36,8 +36,14 @@ struct Args {
     #[clap(short, long)]
     directory: Option<String>,
 
+    #[clap(short, long)]
+    legacy: bool,
+
     #[clap(
-        name = "FASTA FILE (.fa .fasta .fna .zip(multi file archive) .gz .xz .bz2 .bgz .bgzip)"
+        name = "FASTA FILE (.fa .fasta .fna .zip(multi file archive) .gz .xz .bz2 .bgz .bgzip)
+For example:
+    count-fasta-rs -c stats.csv -d path/GENOMIC
+    count-fasta-rs -c stats.csv genomic*files*.f*a"
     )]
     files: Vec<String>,
 }
@@ -76,11 +82,13 @@ fn main() {
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
     } else {
         for result in results {
-            print_results(&result);
+            print_results(&result, args.legacy);
         }
     }
 }
+
 const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
+
 fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
@@ -286,8 +294,13 @@ fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
     }
 }
 
-fn print_results(results: &AnalysisResults) {
-    println!("\nTotal length of sequence:\t{} bp", results.total_length);
+fn print_results(results: &AnalysisResults, legacy: bool) {
+    if ! legacy {
+        println!("\nFile name:\t{} ", results.filename);
+    } else {
+        println!();
+    }
+    println!("Total length of sequence:\t{} bp", results.total_length);
     println!("Total number of sequences:\t{}", results.sequence_count);
     println!(
         "Average contig length is:\t{} bp",
