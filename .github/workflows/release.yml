@@ -121,9 +121,9 @@ jobs:
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
+          rustup update
           if ! command -v cargo > /dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            rustup update
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
       - name: Install dist
