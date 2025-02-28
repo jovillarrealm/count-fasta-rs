@@ -8,7 +8,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use noodles_bgzf as bgzf;
 use rayon::prelude::*;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -28,7 +28,18 @@ fn determine_buffer_size() -> usize {
 }
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(
+    author,
+    version,
+    long_about = "Calculates a dir or a FASTA_FILE and prints its output to stdout.
+Or to a csv file. If the csv file already exists, it appends.
+
+FASTA_FILE (.fa .fasta .fna .zip(multi file archive) .gz .xz .bz2 .bgz .bgzip)
+    
+For example:
+    count-fasta-rs -c stats.csv -d path/GENOMIC
+    count-fasta-rs -c stats.csv genomic*files*.f*a"
+)]
 struct Args {
     #[clap(short, long)]
     csv: Option<String>,
@@ -37,14 +48,12 @@ struct Args {
     directory: Option<String>,
 
     #[clap(short, long)]
+    threads: Option<usize>,
+
+    #[clap(short, long)]
     legacy: bool,
 
-    #[clap(
-        name = "FASTA FILE (.fa .fasta .fna .zip(multi file archive) .gz .xz .bz2 .bgz .bgzip)
-For example:
-    count-fasta-rs -c stats.csv -d path/GENOMIC
-    count-fasta-rs -c stats.csv genomic*files*.f*a"
-    )]
+    #[clap(name = "FASTA FILE")]
     files: Vec<String>,
 }
 
@@ -76,7 +85,7 @@ fn main() {
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
-    let results = process_files(files_to_process);
+    let results = process_files(files_to_process, args.threads);
 
     if let Some(csv_file) = args.csv {
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
@@ -99,14 +108,6 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
                 if VALID_FILES.contains(&ext) {
                     files.push(path);
                 } else if ["gz", "xz", "bz2", "bgz", "bgzip", "zip"].contains(&ext) {
-                    //path.clone().file_name().and_then(|osf_name| {
-                    //    osf_name.to_str().and_then(|f_name| {
-                    //        VALID_FILES
-                    //        .iter()
-                    //        .any(|&v| f_name.contains(v))
-                    //        .then(|| files.push(path))
-                    //    })
-                    //});
                     files.push(path);
                 }
             }
@@ -115,10 +116,9 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
+fn process_files(files: Vec<PathBuf>, threads: Option<usize>) -> Vec<AnalysisResults> {
     let buffer_size = determine_buffer_size();
-    let usable_threads = (num_cpus::get() as f32 * 0.9).round() as usize;
-    let available_threads = min(usable_threads, files.len());
+    let available_threads = determine_threads(&files, threads);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .build()
@@ -142,6 +142,19 @@ fn process_files(files: Vec<PathBuf>) -> Vec<AnalysisResults> {
             })
             .collect()
     })
+}
+
+fn determine_threads(files: &[PathBuf], threads: Option<usize>) -> usize {
+    let available_threads;
+    if let Some(threads) = threads {
+        available_threads = threads;
+    } else {
+        let usable_threads_logical = (num_cpus::get() as f32 * 0.9).round() as usize;
+        let usable_physical_threads = (num_cpus::get_physical() as f32 * 0.75).round() as usize;
+        let usable_threads = max(usable_threads_logical, usable_physical_threads);
+        available_threads = min(usable_threads, files.len());
+    }
+    available_threads
 }
 
 fn process_fasta_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
@@ -295,7 +308,7 @@ fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
 }
 
 fn print_results(results: &AnalysisResults, legacy: bool) {
-    if ! legacy {
+    if !legacy {
         println!("\nFile name:\t{} ", results.filename);
     } else {
         println!();
@@ -362,7 +375,7 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
         buffer.push_str(&line);
 
         // Write in chunks to avoid holding too much in memory
-        if buffer.len() > 64 * 1024 {
+        if buffer.len() > 128 * 1024 {
             file.write_all(buffer.as_bytes())?;
             buffer.clear();
         }
@@ -434,7 +447,7 @@ mod tests {
             files_to_process.extend(files);
         }
 
-        let results = process_files(files_to_process);
+        let results = process_files(files_to_process, None);
 
         let csv_file = "test/attempt.csv";
 
