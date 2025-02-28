@@ -34,25 +34,36 @@ fn determine_buffer_size() -> usize {
     long_about = "Calculates a dir or a FASTA_FILE and prints its output to stdout.
 Or to a csv file. If the csv file already exists, it appends.
 
-FASTA_FILE (.fa .fasta .fna .zip(multi file archive) .gz .xz .bz2 .bgz .bgzip)
+FASTA_FILE can be .fa .fasta .fna .zip .gz .xz .bz2 .bgz .bgzip
     
 For example:
     count-fasta-rs -c stats.csv -d path/GENOMIC
     count-fasta-rs -c stats.csv genomic*files*.f*a"
 )]
 struct Args {
+    /// Path to csv to be created. It will not create a directories if they don't exist.
     #[clap(short, long)]
     csv: Option<String>,
 
+    /// Directory to be processed. Non-recursively.
     #[clap(short, long)]
     directory: Option<String>,
 
+    /// Numbers of threads to be used, otherwise the program will decide.
+    /// 
+    /// It will decide based on the number of available logical threads, physical cpus, and number of files 
+    /// to be processed.
     #[clap(short, long)]
     threads: Option<usize>,
 
+    /// Legacy output
     #[clap(short, long)]
     legacy: bool,
 
+    /// FASTA FILE[s] to be processed [wildcards would work here].
+    /// 
+    /// Inside a zip file, only .fa .fasta .fna files will be processed.
+    /// gz files are assumed to be compressed using gzip, wrong results can come out of a gz file compressed using bzip
     #[clap(name = "FASTA FILE")]
     files: Vec<String>,
 }
