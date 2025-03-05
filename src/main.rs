@@ -42,21 +42,27 @@ For example:
 )]
 struct Args {
     /// Path to csv to be created. It will not create a directories if they don't exist.
+    /// 
+    /// It will append to the csv file if it already exists.
     #[clap(short, long)]
     csv: Option<String>,
 
     /// Directory to be processed. Non-recursively.
+    /// 
+    /// The program will process all any FASTA_FILE in the path.
     #[clap(short, long)]
     directory: Option<String>,
 
-    /// Numbers of threads to be used, otherwise the program will decide.
+    /// Numbers of threads to be used, otherwise the program will decide on its own.
     /// 
-    /// It will decide based on the number of available logical threads, physical cpus, and number of files 
-    /// to be processed.
+    /// It will decide based on the number of available logical threads, physical cpus, checking cgroups, and number of files 
+    /// to be processed. On older machines it probably would default to 1 so it's better to set it manually when running large amounts of data against this.
     #[clap(short, long)]
     threads: Option<usize>,
 
     /// Legacy output
+    /// 
+    /// For debugging and testing purposes.
     #[clap(short, long)]
     legacy: bool,
 
@@ -68,7 +74,7 @@ struct Args {
     files: Vec<String>,
 }
 
-#[derive(Default, Clone, Debug)] // Added Debug derive
+#[derive(Default, Clone, Debug)]
 struct AnalysisResults {
     filename: String,
     total_length: usize,
