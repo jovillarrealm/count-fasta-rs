@@ -5,5 +5,11 @@
     "styles": {
         "theme": "hacker",
         "favicon": "https://www.fundacionudea.com/sitio/img/cropped-apple_favicon-90x90.png"
+    },
+    "components": {
+    "changelog": true,
+    "artifacts": {
+      "cargo_dist": true
     }
+  }
 }
