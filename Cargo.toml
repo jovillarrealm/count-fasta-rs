@@ -25,6 +25,7 @@ debug = true
 [profile.dist]
 inherits = "release"
 lto = true
+feature = "runtime-dispatch-simd"
 
 [dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
@@ -34,7 +35,10 @@ zip = "2.2.0"
 bytecount = "0.6.8"
 xz2 = "0.1"
 bzip2 = "0.5"
-noodles = { version = "0.93.0", features = ["bgzf"] }
-noodles-bgzf = "0.36.0"
-noodles-core = "0.16.0"
+noodles = { version = "0.95.0", features = ["bgzf"] }
+noodles-bgzf = "0.37.0"
+noodles-core = "0.17.0"
 num_cpus = "1.16.0"
+
+[features]
+runtime-dispatch-simd = ["bytecount/runtime-dispatch-simd"]

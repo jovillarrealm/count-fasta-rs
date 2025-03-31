@@ -19,8 +19,8 @@ extern crate bytecount;
 extern crate num_cpus;
 
 fn determine_buffer_size() -> usize {
-    const DEFAULT_SIZE: usize = 5 * 1024 * 1024; // Default to 1MB
-    const MAX_SIZE: usize = 10 * 1024 * 1024; // Cap at 10MB
+    const DEFAULT_SIZE: usize = 1 * 1024 * 1024; // Default to 1MB
+    const MAX_SIZE: usize = 1 * 1024 * 1024; // Cap at 10MB
     match env::var("BUFFER_SIZE") {
         Ok(val) => val.parse().unwrap_or(DEFAULT_SIZE).min(MAX_SIZE),
         Err(_) => DEFAULT_SIZE,
