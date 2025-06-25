@@ -1,7 +1,7 @@
 [package]
 name = "count-fasta-rs"
-version = "0.6.4"
-edition = "2021"
+version = "0.6.5"
+edition = "2024"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
 [profile.release]
@@ -31,12 +31,12 @@ feature = "runtime-dispatch-simd"
 clap = { version = "4.5.20", features = ["derive"] }
 rayon = "1.8"
 flate2 = "1.0.34"
-zip = "2.2.0"
+zip = "4.2.0"
 bytecount = "0.6.8"
-xz2 = "0.1"
-bzip2 = "0.5"
-noodles = { version = "0.95.0", features = ["bgzf"] }
-noodles-bgzf = "0.37.0"
+liblzma = "0.4.0"
+bzip2 = "0.6"
+noodles = { version = "0.99.0", features = ["bgzf"] }
+noodles-bgzf = "0.41.0"
 noodles-core = "0.17.0"
 num_cpus = "1.16.0"
 

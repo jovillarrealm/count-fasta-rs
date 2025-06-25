@@ -13,8 +13,9 @@ use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use xz2::read::XzDecoder;
+use liblzma::read::XzDecoder;
 use zip::read::ZipArchive;
+
 extern crate bytecount;
 extern crate num_cpus;
 
@@ -406,6 +407,7 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
     Ok(())
 }
 
+
 fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
         filename: file.file_name().unwrap().to_string_lossy().to_string(),
@@ -418,6 +420,7 @@ fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<Analy
     process_reader(reader, &mut results)?;
     Ok(vec![results])
 }
+
 
 fn process_bz2_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults {
@@ -438,10 +441,9 @@ fn process_bgzip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<An
         shortest_contig: usize::MAX,
         ..Default::default()
     };
-    let file = File::open(file)?;
-    let mut reader = bgzf::Reader::new(file);
+    let mut reader = File::open("data.gz").map(bgzf::io::Reader::new)?;
     let mut buffer = Vec::new();
-
+    
     // Read entire decompressed content
     reader.read_to_end(&mut buffer)?;
 
