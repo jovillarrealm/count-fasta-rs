@@ -441,7 +441,7 @@ fn process_bgzip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<An
         shortest_contig: usize::MAX,
         ..Default::default()
     };
-    let mut reader = File::open("data.gz").map(bgzf::io::Reader::new)?;
+    let mut reader = File::open(file).map(bgzf::io::Reader::new)?;
     let mut buffer = Vec::new();
     
     // Read entire decompressed content
