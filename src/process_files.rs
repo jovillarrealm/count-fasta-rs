@@ -13,7 +13,7 @@ use std::path::Path;
 use zip::read::ZipArchive;
 
 pub const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
-pub const VALID_COMPRESSION: [&str; 6] = ["gz", "xz", "bz2", "bgz", "bgzip", "zip"];
+pub const VALID_COMPRESSION: [&str; 7] = ["gz", "xz", "bz2", "bgz", "bgzip", "zip", "naf"];
 
 #[derive(Default, Clone, Debug)]
 pub struct AnalysisResults {
@@ -107,17 +107,17 @@ pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
     let offset =0;
 
     for may_seq in decoder {
-        let seq = may_seq.expect(&format!("{file:?} had bad data"));
-        let seq_length = usize::try_from(seq.length.expect(&format!("naf file had empty seq on {file:?}?"))).expect(&format!("failed to turn u64 to usize on {file:?}"));
+        let seq = may_seq.unwrap_or_else(|_| panic!("{file:?} had bad data"));
+        let seq_length = usize::try_from(seq.length.unwrap_or_else(|| panic!("naf file had empty seq on {file:?}?"))).unwrap_or_else(|_| panic!("failed to turn u64 to usize on {file:?}"));
         results.total_length += seq_length;
         results.largest_contig = results.largest_contig.max(seq_length);
         results.shortest_contig = results.shortest_contig.min(seq_length);
         lengths.push(seq_length);
-        let line = seq.sequence.expect(&format!("naf sequence had bad data {file:?}"));
+        let line = seq.sequence.unwrap_or_else(|| panic!("naf sequence had bad data {file:?}"));
         let _ = process_sequence_line(line.as_bytes(), &mut results, offset); // GC and N counts are updated
     }
     results.sequence_count = lengths.len();
-
+    calc_nq_stats(&lengths, &mut results);
 
     Ok(vec![results])
 }
@@ -157,7 +157,7 @@ pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<
                 };
                 let reader = BufReader::with_capacity(buffer_size, zip_file);
                 if let Err(e) = process_reader(reader, &mut result) {
-                    eprintln!("Error processing {}: {}", file_name, e);
+                    eprintln!("Error processing {file_name}: {e}");
                     continue; // Skip this file but continue processing others
                 };
                 all_results.push(result);

@@ -100,9 +100,9 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
         let path = entry?.path();
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-                if process_files::VALID_FILES.contains(&ext) {
-                    files.push(path);
-                } else if process_files::VALID_COMPRESSION.contains(&ext) {
+                if process_files::VALID_FILES.contains(&ext)
+                    || process_files::VALID_COMPRESSION.contains(&ext)
+                {
                     files.push(path);
                 }
             }
@@ -259,21 +259,21 @@ mod tests {
         let csv_file = "test/attempt.csv";
 
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
-        let mut thing:Vec<String> = fs::read_to_string("test/test.csv")
+        let mut thing: Vec<String> = fs::read_to_string("test/test.csv")
             .unwrap()
             .lines()
             .map(String::from) // make each slice into a string
             .collect();
-        let mut compare:Vec<String> = fs::read_to_string(csv_file)
+        let mut compare: Vec<String> = fs::read_to_string(csv_file)
             .unwrap()
             .lines()
             .map(String::from) // make each slice into a string
             .collect();
         thing.sort();
         compare.sort();
-        for (thing_i, compare_i) in zip_things(thing, compare){
+        for (thing_i, compare_i) in zip_things(thing, compare) {
             assert_eq!(thing_i, compare_i);
-        } 
+        }
         let _ = fs::remove_file(csv_file);
     }
 }

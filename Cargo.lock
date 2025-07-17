@@ -217,7 +217,7 @@ checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "count-fasta-rs"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "bytecount",
  "bzip2",
