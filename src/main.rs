@@ -3,25 +3,21 @@
 // at your option. This file may not be copied, modified,
 // or distributed except according to those terms.
 
-use bzip2::read::BzDecoder;
 use clap::Parser;
-use flate2::read::GzDecoder;
-use noodles_bgzf as bgzf;
 use rayon::prelude::*;
 use std::cmp::{max, min};
 use std::env;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use liblzma::read::XzDecoder;
-use zip::read::ZipArchive;
+
+mod process_files;
 
 extern crate bytecount;
 extern crate num_cpus;
 
 fn determine_buffer_size() -> usize {
-    const DEFAULT_SIZE: usize = 1 * 1024 * 1024; // Default to 1MB
-    const MAX_SIZE: usize = 1 * 1024 * 1024; // Cap at 10MB
+    const DEFAULT_SIZE: usize = 2 * 1024 * 1024; // Default to 1MB
+    const MAX_SIZE: usize = 5 * 1024 * 1024; // Cap at 10MB
     match env::var("BUFFER_SIZE") {
         Ok(val) => val.parse().unwrap_or(DEFAULT_SIZE).min(MAX_SIZE),
         Err(_) => DEFAULT_SIZE,
@@ -43,53 +39,36 @@ For example:
 )]
 struct Args {
     /// Path to csv to be created. It will not create a directories if they don't exist.
-    /// 
+    ///
     /// It will append to the csv file if it already exists.
     #[clap(short, long)]
     csv: Option<String>,
 
     /// Directory to be processed. Non-recursively.
-    /// 
+    ///
     /// The program will process all any FASTA_FILE in the path.
     #[clap(short, long)]
     directory: Option<String>,
 
     /// Numbers of threads to be used, otherwise the program will decide on its own.
-    /// 
-    /// It will decide based on the number of available logical threads, physical cpus, checking cgroups, and number of files 
+    ///
+    /// It will decide based on the number of available logical threads, physical cpus, checking cgroups, and number of files
     /// to be processed. On older machines it probably would default to 1 so it's better to set it manually when running large amounts of data against this.
     #[clap(short, long)]
     threads: Option<usize>,
 
     /// Legacy output
-    /// 
+    ///
     /// For debugging and testing purposes.
     #[clap(short, long)]
     legacy: bool,
 
     /// FASTA FILE[s] to be processed [wildcards would work here].
-    /// 
+    ///
     /// Inside a zip file, only .fa .fasta .fna files will be processed.
     /// gz files are assumed to be compressed using gzip, wrong results can come out of a gz file compressed using bzip
     #[clap(name = "FASTA FILE")]
     files: Vec<String>,
-}
-
-#[derive(Default, Clone, Debug)]
-struct AnalysisResults {
-    filename: String,
-    total_length: usize,
-    sequence_count: usize,
-    gc_count: usize,
-    n_count: usize,
-    n25: usize,
-    n25_sequence_count: usize,
-    n50: usize,
-    n50_sequence_count: usize,
-    n75: usize,
-    n75_sequence_count: usize,
-    largest_contig: usize,
-    shortest_contig: usize,
 }
 
 fn main() {
@@ -114,8 +93,6 @@ fn main() {
     }
 }
 
-const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
-
 fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
@@ -123,9 +100,9 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
         let path = entry?.path();
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-                if VALID_FILES.contains(&ext) {
-                    files.push(path);
-                } else if ["gz", "xz", "bz2", "bgz", "bgzip", "zip"].contains(&ext) {
+                if process_files::VALID_FILES.contains(&ext)
+                    || process_files::VALID_COMPRESSION.contains(&ext)
+                {
                     files.push(path);
                 }
             }
@@ -134,7 +111,10 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn process_files(files: Vec<PathBuf>, threads: Option<usize>) -> Vec<AnalysisResults> {
+fn process_files(
+    files: Vec<PathBuf>,
+    threads: Option<usize>,
+) -> Vec<process_files::AnalysisResults> {
     let buffer_size = determine_buffer_size();
     let available_threads = determine_threads(&files, threads);
     let pool = rayon::ThreadPoolBuilder::new()
@@ -147,13 +127,16 @@ fn process_files(files: Vec<PathBuf>, threads: Option<usize>) -> Vec<AnalysisRes
             .flat_map(|file| {
                 let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
                 match ext {
-                    "gz" => process_gz_file(file, buffer_size).unwrap_or_default(),
-                    "zip" => process_zip_file(file, buffer_size).unwrap_or_default(),
-                    "xz" => process_xz_file(file, buffer_size).unwrap_or_default(),
-                    "bz2" => process_bz2_file(file, buffer_size).unwrap_or_default(),
-                    "bgz" | "bgzip" => process_bgzip_file(file, buffer_size).unwrap_or_default(),
-                    _ if VALID_FILES.contains(&ext) => {
-                        process_fasta_file(file, buffer_size).unwrap_or_default()
+                    "gz" => process_files::process_gz_file(file, buffer_size).unwrap_or_default(),
+                    "zip" => process_files::process_zip_file(file, buffer_size).unwrap_or_default(),
+                    "xz" => process_files::process_xz_file(file, buffer_size).unwrap_or_default(),
+                    "bz2" => process_files::process_bz2_file(file, buffer_size).unwrap_or_default(),
+                    "bgz" | "bgzip" => {
+                        process_files::process_bgzip_file(file, buffer_size).unwrap_or_default()
+                    }
+                    "naf" => process_files::process_naf_file(file).unwrap_or_default(),
+                    _ if process_files::VALID_FILES.contains(&ext) => {
+                        process_files::process_fasta_file(file, buffer_size).unwrap_or_default()
                     }
                     _ => Vec::new(),
                 }
@@ -175,157 +158,7 @@ fn determine_threads(files: &[PathBuf], threads: Option<usize>) -> usize {
     available_threads
 }
 
-fn process_fasta_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let file = File::open(file)?;
-    let reader = BufReader::with_capacity(buffer_size, file);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
-}
-
-fn process_gz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let file = File::open(file)?;
-    let gz = GzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size, gz);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
-}
-
-fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let file = File::open(file)?;
-    let buf_reader = BufReader::with_capacity(buffer_size, file);
-    let mut archive = ZipArchive::new(buf_reader)?;
-    let mut all_results = Vec::new();
-
-    for i in 0..archive.len() {
-        let zip_file = archive.by_index(i)?;
-        if zip_file.is_file() {
-            let file_name = zip_file.name().to_owned();
-            if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
-                let mut result = AnalysisResults {
-                    filename: Path::new(&file_name)
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string(),
-                    shortest_contig: usize::MAX,
-                    ..Default::default()
-                };
-                let reader = BufReader::with_capacity(buffer_size, zip_file);
-                if let Err(e) = process_reader(reader, &mut result) {
-                    eprintln!("Error processing {}: {}", file_name, e);
-                    continue; // Skip this file but continue processing others
-                };
-                all_results.push(result);
-            }
-        }
-    }
-
-    Ok(all_results)
-}
-
-fn process_reader<R: Read>(
-    mut reader: BufReader<R>,
-    results: &mut AnalysisResults,
-) -> std::io::Result<()> {
-    let mut lengths = Vec::with_capacity(250);
-    let mut current_sequence_length = 0;
-    let mut line = Vec::with_capacity(128);
-    let offset;
-
-    if reader.read_until(b'\n', &mut line)? > 0 {
-        results.sequence_count += 1;
-        //Assuming the first line is a header line and starts with '>'
-        offset = {
-            if line.ends_with(b"\r\n") {
-                Some(2) // Exclude the newline character
-            } else if line.ends_with(b"\n") {
-                Some(1) // Exclude the newline characters
-            } else {
-                None // No newline characters?
-            }
-        };
-        line.clear();
-    } else {
-        return Ok(()); // Nothing read from the file
-    };
-    let Some(offset) = offset else {
-        return Ok(()); // No newline characters?
-    };
-
-    while reader.read_until(b'\n', &mut line)? > 0 {
-        // Already processed the first line
-        if line.first() == Some(&b'>') {
-            results.total_length += current_sequence_length;
-            results.largest_contig = results.largest_contig.max(current_sequence_length);
-            results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-            lengths.push(current_sequence_length);
-            current_sequence_length = 0;
-            results.sequence_count += 1;
-        } else {
-            current_sequence_length += process_sequence_line(&line, results, offset);
-        }
-        line.clear();
-    }
-
-    if current_sequence_length > 0 {
-        results.total_length += current_sequence_length;
-        results.largest_contig = results.largest_contig.max(current_sequence_length);
-        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
-        lengths.push(current_sequence_length);
-    }
-
-    calc_nq_stats(&lengths, results);
-    Ok(())
-}
-
-fn process_sequence_line(line: &[u8], results: &mut AnalysisResults, offset: usize) -> usize {
-    results.gc_count += bytecount::count(line, b'G')
-        + bytecount::count(line, b'g')
-        + bytecount::count(line, b'C')
-        + bytecount::count(line, b'c');
-    results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
-    if line.ends_with(b"\n") {
-        line.len() - offset // Exclude the newline character
-    } else {
-        line.len()
-    }
-}
-
-fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
-    let total_length: usize = lengths.iter().sum();
-    let mut cumulative_length = 0;
-    let mut sorted_lengths = lengths.to_vec();
-    sorted_lengths.sort_unstable_by(|a, b| b.cmp(a));
-
-    for (i, &length) in sorted_lengths.iter().enumerate() {
-        cumulative_length += length;
-        if results.n25 == 0 && cumulative_length >= total_length / 4 {
-            results.n25 = length;
-            results.n25_sequence_count = i + 1;
-        }
-        if results.n50 == 0 && cumulative_length >= total_length / 2 {
-            results.n50 = length;
-            results.n50_sequence_count = i + 1;
-        }
-        if results.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
-            results.n75 = length;
-            results.n75_sequence_count = i + 1;
-            break;
-        }
-    }
-}
-
-fn print_results(results: &AnalysisResults, legacy: bool) {
+fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
     if !legacy {
         println!("\nFile name:\t{} ", results.filename);
     } else {
@@ -363,7 +196,7 @@ fn print_results(results: &AnalysisResults, legacy: bool) {
     );
 }
 
-fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<()> {
+fn append_to_csv(results: &[process_files::AnalysisResults], csv_filename: &str) -> io::Result<()> {
     let csv_exists = Path::new(csv_filename).exists();
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -407,57 +240,12 @@ fn append_to_csv(results: &[AnalysisResults], csv_filename: &str) -> io::Result<
     Ok(())
 }
 
-
-fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let file = File::open(file)?;
-    let xz = XzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size, xz);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
-}
-
-
-fn process_bz2_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let file = File::open(file)?;
-    let bz = BzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size, bz);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
-}
-
-fn process_bgzip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let mut reader = File::open(file).map(bgzf::io::Reader::new)?;
-    let mut buffer = Vec::new();
-    
-    // Read entire decompressed content
-    reader.read_to_end(&mut buffer)?;
-
-    let reader = BufReader::with_capacity(buffer_size, &buffer[..]);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
-
+    use std::iter::zip as zip_things;
     #[test]
     fn it_works() {
         let mut files_to_process = Vec::new();
@@ -471,9 +259,21 @@ mod tests {
         let csv_file = "test/attempt.csv";
 
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
-        let thing = fs::read_to_string("test/test.csv").unwrap();
-        let compare = fs::read_to_string(csv_file).unwrap();
-        assert_eq!(thing, compare);
+        let mut thing: Vec<String> = fs::read_to_string("test/test.csv")
+            .unwrap()
+            .lines()
+            .map(String::from) // make each slice into a string
+            .collect();
+        let mut compare: Vec<String> = fs::read_to_string(csv_file)
+            .unwrap()
+            .lines()
+            .map(String::from) // make each slice into a string
+            .collect();
+        thing.sort();
+        compare.sort();
+        for (thing_i, compare_i) in zip_things(thing, compare) {
+            assert_eq!(thing_i, compare_i);
+        }
         let _ = fs::remove_file(csv_file);
     }
 }
