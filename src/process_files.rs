@@ -200,12 +200,8 @@ fn process_reader<R: Read>(
     while reader.read_until(b'\n', &mut line)? > 0 {
         // Already processed the first line
         if line.first() == Some(&b'>') {
-            results.total_length += current_sequence_length;
-            results.largest_contig = results.largest_contig.max(current_sequence_length);
-            results.shortest_contig = results.shortest_contig.min(current_sequence_length);
             lengths.push(current_sequence_length);
             current_sequence_length = 0;
-            results.sequence_count += 1;
         } else {
             current_sequence_length += process_sequence_line(&line, results, offset);
         }
@@ -213,9 +209,6 @@ fn process_reader<R: Read>(
     }
 
     if current_sequence_length > 0 {
-        results.total_length += current_sequence_length;
-        results.largest_contig = results.largest_contig.max(current_sequence_length);
-        results.shortest_contig = results.shortest_contig.min(current_sequence_length);
         lengths.push(current_sequence_length);
     }
 
@@ -236,11 +229,17 @@ fn process_sequence_line(line: &[u8], results: &mut AnalysisResults, offset: usi
     }
 }
 
+/// Sets Everything in resuts but filename, GC count, N count
 fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
     let total_length: usize = lengths.iter().sum();
+    results.total_length = total_length;
+    results.sequence_count = lengths.len();
     let mut cumulative_length = 0;
     let mut sorted_lengths = lengths.to_vec();
     sorted_lengths.sort_unstable_by(|a, b| b.cmp(a));
+    results.largest_contig = *sorted_lengths.first().unwrap_or(&0);
+    results.shortest_contig = *sorted_lengths.last().unwrap_or(&usize::MAX);
+
 
     for (i, &length) in sorted_lengths.iter().enumerate() {
         cumulative_length += length;
