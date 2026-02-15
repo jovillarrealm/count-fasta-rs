@@ -76,8 +76,12 @@ fn main() {
     let mut files_to_process = Vec::new();
 
     if let Some(dir) = args.directory {
-        if let Ok(files) = get_fasta_files_from_directory(&dir) {
-            files_to_process.extend(files);
+        match get_fasta_files_from_directory(&dir) {
+            Ok(files) => files_to_process.extend(files),
+            Err(e) => {
+                eprintln!("Error reading directory '{}': {}", dir, e);
+                std::process::exit(1);
+            }
         }
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
@@ -126,19 +130,26 @@ fn process_files(
             .par_iter()
             .flat_map(|file| {
                 let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                match ext {
-                    "gz" => process_files::process_gz_file(file, buffer_size).unwrap_or_default(),
-                    "zip" => process_files::process_zip_file(file, buffer_size).unwrap_or_default(),
-                    "xz" => process_files::process_xz_file(file, buffer_size).unwrap_or_default(),
-                    "bz2" => process_files::process_bz2_file(file, buffer_size).unwrap_or_default(),
+                let res = match ext {
+                    "gz" => process_files::process_gz_file(file, buffer_size),
+                    "zip" => process_files::process_zip_file(file, buffer_size),
+                    "xz" => process_files::process_xz_file(file, buffer_size),
+                    "bz2" => process_files::process_bz2_file(file, buffer_size),
                     "bgz" | "bgzip" => {
-                        process_files::process_bgzip_file(file, buffer_size).unwrap_or_default()
+                        process_files::process_bgzip_file(file, buffer_size)
                     }
-                    "naf" => process_files::process_naf_file(file).unwrap_or_default(),
+                    "naf" => process_files::process_naf_file(file),
                     _ if process_files::VALID_FILES.contains(&ext) => {
-                        process_files::process_fasta_file(file, buffer_size).unwrap_or_default()
+                        process_files::process_fasta_file(file, buffer_size)
                     }
-                    _ => Vec::new(),
+                    _ => Ok(Vec::new()),
+                };
+                match res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("Error processing file {:?}: {}", file, e);
+                        Vec::new()
+                    }
                 }
             })
             .collect()

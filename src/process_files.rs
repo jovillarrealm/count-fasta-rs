@@ -11,6 +11,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use zip::read::ZipArchive;
+use memchr::memchr;
+use memmap2::{Mmap, Advice};
 
 pub const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
 pub const VALID_COMPRESSION: [&str; 7] = ["gz", "xz", "bz2", "bgz", "bgzip", "zip", "naf"];
@@ -32,49 +34,63 @@ pub struct AnalysisResults {
     pub shortest_contig: usize,
 }
 
+impl AnalysisResults {
+    pub fn new(filename: String) -> Self {
+        Self {
+            filename,
+            shortest_contig: usize::MAX,
+            ..Default::default()
+        }
+    }
+
+    pub fn calculate_stats(&mut self, mut lengths: Vec<usize>) {
+        let total_length: usize = lengths.iter().sum();
+        self.total_length = total_length;
+        self.sequence_count = lengths.len();
+        let mut cumulative_length = 0;
+        lengths.sort_unstable_by(|a, b| b.cmp(a)); // Sort in-place
+        self.largest_contig = *lengths.first().unwrap_or(&0);
+        self.shortest_contig = *lengths.last().unwrap_or(&usize::MAX);
+
+        for (i, &length) in lengths.iter().enumerate() {
+            cumulative_length += length;
+            if self.n25 == 0 && cumulative_length >= total_length / 4 {
+                self.n25 = length;
+                self.n25_sequence_count = i + 1;
+            }
+            if self.n50 == 0 && cumulative_length >= total_length / 2 {
+                self.n50 = length;
+                self.n50_sequence_count = i + 1;
+            }
+            if self.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
+                self.n75 = length;
+                self.n75_sequence_count = i + 1;
+                break;
+            }
+        }
+    }
+}
+
 pub fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let file = File::open(file)?;
-    let xz = XzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size, xz);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
+    process_decoded_stream(file, buffer_size, XzDecoder::new)
 }
 
 pub fn process_bz2_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
-    let file = File::open(file)?;
-    let bz = BzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size, bz);
-    process_reader(reader, &mut results)?;
-    Ok(vec![results])
+    process_decoded_stream(file, buffer_size, BzDecoder::new)
 }
 
 pub fn process_bgzip_file(
     file: &Path,
     buffer_size: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
+    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
     let mut reader = File::open(file).map(bgzf::io::Reader::new)?;
     let mut buffer = Vec::new();
 
     // Read entire decompressed content
     reader.read_to_end(&mut buffer)?;
 
-    let reader = BufReader::with_capacity(buffer_size, &buffer[..]);
-    process_reader(reader, &mut results)?;
+    process_buffer(&buffer, &mut results)?;
     Ok(vec![results])
 }
 
@@ -82,23 +98,33 @@ pub fn process_fasta_file(
     file: &Path,
     buffer_size: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
+    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
     let file = File::open(file)?;
-    let reader = BufReader::with_capacity(buffer_size, file);
-    process_reader(reader, &mut results)?;
+    
+    // Try to use mmap, fallback to BufReader if it fails (e.g. empty file or special file)
+    let mmap_result = unsafe { Mmap::map(&file) };
+    
+    match mmap_result {
+        Ok(mmap) => {
+            mmap.advise(Advice::Sequential)?;
+            process_buffer(&mmap, &mut results)?;
+        }
+        Err(_) => {
+            // Re-open or just use the existing file handle if possible, 
+            // but File definition in map consumes it? No, map takes &File.
+            // But we need to reset position if we read from it? 
+            // We haven't read from it yet.
+            println!("Failed to mmap file: {:?}", file);
+            let reader = BufReader::with_capacity(buffer_size, file);
+            process_reader(reader, &mut results)?;
+        }
+    }
+    
     Ok(vec![results])
 }
 
 pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
+    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
     let decoder = nafcodec::Decoder::from_path(file)
         .expect("failed to open nucleotide archive");
 
@@ -117,20 +143,28 @@ pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
         let _ = process_sequence_line(line.as_bytes(), &mut results, offset); // GC and N counts are updated
     }
     results.sequence_count = lengths.len();
-    calc_nq_stats(&lengths, &mut results);
+    calc_nq_stats(lengths, &mut results);
 
     Ok(vec![results])
 }
 
 pub fn process_gz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults {
-        filename: file.file_name().unwrap().to_string_lossy().to_string(),
-        shortest_contig: usize::MAX,
-        ..Default::default()
-    };
+    process_decoded_stream(file, buffer_size, GzDecoder::new)
+}
+
+fn process_decoded_stream<D, F>(
+    file: &Path,
+    buffer_size: usize,
+    decoder_factory: F,
+) -> std::io::Result<Vec<AnalysisResults>>
+where
+    D: Read,
+    F: Fn(File) -> D,
+{
+    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
     let file = File::open(file)?;
-    let gz = GzDecoder::new(file);
-    let reader = BufReader::with_capacity(buffer_size, gz);
+    let decoder = decoder_factory(file);
+    let reader = BufReader::with_capacity(buffer_size, decoder);
     process_reader(reader, &mut results)?;
     Ok(vec![results])
 }
@@ -146,15 +180,11 @@ pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<
         if zip_file.is_file() {
             let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
-                let mut result = AnalysisResults {
-                    filename: Path::new(&file_name)
+                let mut result = AnalysisResults::new(Path::new(&file_name)
                         .file_name()
                         .unwrap()
                         .to_string_lossy()
-                        .to_string(),
-                    shortest_contig: usize::MAX,
-                    ..Default::default()
-                };
+                        .to_string());
                 let reader = BufReader::with_capacity(buffer_size, zip_file);
                 if let Err(e) = process_reader(reader, &mut result) {
                     eprintln!("Error processing {file_name}: {e}");
@@ -212,7 +242,7 @@ fn process_reader<R: Read>(
         lengths.push(current_sequence_length);
     }
 
-    calc_nq_stats(&lengths, results);
+    calc_nq_stats(lengths, results);
     Ok(())
 }
 
@@ -229,32 +259,66 @@ fn process_sequence_line(line: &[u8], results: &mut AnalysisResults, offset: usi
     }
 }
 
-/// Sets Everything in resuts but filename, GC count, N count
-fn calc_nq_stats(lengths: &[usize], results: &mut AnalysisResults) {
-    let total_length: usize = lengths.iter().sum();
-    results.total_length = total_length;
-    results.sequence_count = lengths.len();
-    let mut cumulative_length = 0;
-    let mut sorted_lengths = lengths.to_vec();
-    sorted_lengths.sort_unstable_by(|a, b| b.cmp(a));
-    results.largest_contig = *sorted_lengths.first().unwrap_or(&0);
-    results.shortest_contig = *sorted_lengths.last().unwrap_or(&usize::MAX);
-
-
-    for (i, &length) in sorted_lengths.iter().enumerate() {
-        cumulative_length += length;
-        if results.n25 == 0 && cumulative_length >= total_length / 4 {
-            results.n25 = length;
-            results.n25_sequence_count = i + 1;
-        }
-        if results.n50 == 0 && cumulative_length >= total_length / 2 {
-            results.n50 = length;
-            results.n50_sequence_count = i + 1;
-        }
-        if results.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
-            results.n75 = length;
-            results.n75_sequence_count = i + 1;
-            break;
-        }
+fn process_buffer(
+    data: &[u8],
+    results: &mut AnalysisResults,
+) -> std::io::Result<()> {
+    let mut lengths = Vec::with_capacity(250);
+    let mut current_sequence_length = 0;
+    
+    let mut i = 0;
+    let len = data.len();
+    
+    // Check if empty
+    if len == 0 {
+        return Ok(());
     }
+    
+    // find first newline
+    let first_newline = match memchr(b'\n', &data[i..]) {
+        Some(pos) => pos + i,
+        None => return Ok(()), // No newline found
+    };
+    
+    let first_line = &data[i..=first_newline];
+    results.sequence_count += 1;
+    
+    let offset = if first_line.ends_with(b"\r\n") {
+        2
+    } else if first_line.ends_with(b"\n") {
+        1
+    } else {
+        0
+    };
+    
+    i = first_newline + 1;
+    
+    while i < len {
+        let next_newline = match memchr(b'\n', &data[i..]) {
+            Some(pos) => pos + i,
+            None => len - 1,
+        };
+        
+        let line_end = if next_newline < len { next_newline + 1 } else { len };
+        let line = &data[i..line_end];
+        
+        if line.first() == Some(&b'>') {
+            lengths.push(current_sequence_length);
+            current_sequence_length = 0;
+             // Start new sequence
+        } else {
+            current_sequence_length += process_sequence_line(line, results, offset);
+        }
+        
+        i = line_end;
+    }
+    
+    if current_sequence_length > 0 {
+        lengths.push(current_sequence_length);
+    }
+    
+    calc_nq_stats(lengths, results);
+    Ok(())
 }
+
+
