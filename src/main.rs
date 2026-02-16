@@ -102,14 +102,10 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-                if process_files::VALID_FILES.contains(&ext)
-                    || process_files::VALID_COMPRESSION.contains(&ext)
-                {
-                    files.push(path);
-                }
-            }
+        if path.is_file() && path.extension().and_then(|s| s.to_str()).is_some_and(|ext| {
+            process_files::VALID_FILES.contains(&ext) || process_files::VALID_COMPRESSION.contains(&ext)
+        }) {
+            files.push(path);
         }
     }
     Ok(files)

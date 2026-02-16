@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use zip::read::ZipArchive;
 use memchr::memchr;
-use memmap2::{Mmap, Advice};
+use memmap2::Mmap;
 
 pub const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
 pub const VALID_COMPRESSION: [&str; 7] = ["gz", "xz", "bz2", "bgz", "bgzip", "zip", "naf"];
@@ -83,15 +83,7 @@ pub fn process_bgzip_file(
     file: &Path,
     buffer_size: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
-    let mut reader = File::open(file).map(bgzf::io::Reader::new)?;
-    let mut buffer = Vec::new();
-
-    // Read entire decompressed content
-    reader.read_to_end(&mut buffer)?;
-
-    process_buffer(&buffer, &mut results)?;
-    Ok(vec![results])
+    process_decoded_stream(file, buffer_size, bgzf::io::Reader::new)
 }
 
 pub fn process_fasta_file(
@@ -106,7 +98,8 @@ pub fn process_fasta_file(
     
     match mmap_result {
         Ok(mmap) => {
-            mmap.advise(Advice::Sequential)?;
+            #[cfg(unix)]
+            mmap.advise(memmap2::Advice::Sequential)?;
             process_buffer(&mmap, &mut results)?;
         }
         Err(_) => {
@@ -130,7 +123,7 @@ pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
 
     // Process naf file
     let mut lengths = Vec::with_capacity(250);
-    let offset =0;
+
 
     for may_seq in decoder {
         let seq = may_seq.unwrap_or_else(|_| panic!("{file:?} had bad data"));
@@ -140,10 +133,10 @@ pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
         results.shortest_contig = results.shortest_contig.min(seq_length);
         lengths.push(seq_length);
         let line = seq.sequence.unwrap_or_else(|| panic!("naf sequence had bad data {file:?}"));
-        let _ = process_sequence_line(line.as_bytes(), &mut results, offset); // GC and N counts are updated
+        update_stats(line.as_bytes(), &mut results);
     }
     results.sequence_count = lengths.len();
-    calc_nq_stats(lengths, &mut results);
+    results.calculate_stats(lengths);
 
     Ok(vec![results])
 }
@@ -204,59 +197,98 @@ fn process_reader<R: Read>(
 ) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
-    let mut line = Vec::with_capacity(128);
-    let offset;
 
-    if reader.read_until(b'\n', &mut line)? > 0 {
+    // Read header line safely to determine offset
+    let mut line = Vec::new(); // Temporary buffer for header only
+    let offset = if reader.read_until(b'\n', &mut line)? > 0 {
         results.sequence_count += 1;
-        //Assuming the first line is a header line and starts with '>'
-        offset = {
-            if line.ends_with(b"\r\n") {
-                Some(2) // Exclude the newline character
-            } else if line.ends_with(b"\n") {
-                Some(1) // Exclude the newline characters
-            } else {
-                None // No newline characters?
-            }
-        };
-        line.clear();
+        if line.ends_with(b"\r\n") {
+            Some(2)
+        } else if line.ends_with(b"\n") {
+            Some(1)
+        } else {
+            None
+        }
     } else {
-        return Ok(()); // Nothing read from the file
-    };
-    let Some(offset) = offset else {
-        return Ok(()); // No newline characters?
+        return Ok(());
     };
 
-    while reader.read_until(b'\n', &mut line)? > 0 {
-        // Already processed the first line
-        if line.first() == Some(&b'>') {
-            lengths.push(current_sequence_length);
-            current_sequence_length = 0;
-        } else {
-            current_sequence_length += process_sequence_line(&line, results, offset);
+    let Some(offset) = offset else {
+        return Ok(());
+    };
+
+    let mut start_of_line = true;
+    let mut in_header = false;
+
+    loop {
+        let buf = reader.fill_buf()?;
+        let len = buf.len();
+        if len == 0 { break; }
+
+        let mut consumed = 0;
+
+        while consumed < len {
+            // Check start of header
+            if start_of_line && buf[consumed] == b'>' {
+                lengths.push(current_sequence_length);
+                current_sequence_length = 0;
+                in_header = true;
+            }
+
+            if in_header {
+                 // Scan for end of header (newline)
+                 match memchr(b'\n', &buf[consumed..]) {
+                    Some(pos) => {
+                        consumed += pos + 1;
+                        start_of_line = true;
+                        in_header = false;
+                    }
+                    None => {
+                        consumed = len;
+                        start_of_line = false; // Still in header
+                    }
+                }
+            } else {
+                // In sequence
+                match memchr(b'\n', &buf[consumed..]) {
+                    Some(pos) => {
+                         let end = consumed + pos + 1;
+                         let chunk = &buf[consumed..end];
+                         update_stats(chunk, results);
+                         current_sequence_length += chunk.len().saturating_sub(offset);
+                         
+                         consumed = end;
+                         start_of_line = true;
+                    }
+                    None => {
+                        // Entire buffer is sequence data (no newline)
+                        let chunk = &buf[consumed..];
+                        update_stats(chunk, results);
+                        current_sequence_length += chunk.len();
+                        
+                        consumed = len;
+                        start_of_line = false;
+                    }
+                }
+            }
         }
-        line.clear();
+        reader.consume(consumed);
     }
 
     if current_sequence_length > 0 {
         lengths.push(current_sequence_length);
     }
 
-    calc_nq_stats(lengths, results);
+    results.calculate_stats(lengths);
     Ok(())
 }
 
-fn process_sequence_line(line: &[u8], results: &mut AnalysisResults, offset: usize) -> usize {
+fn update_stats(line: &[u8], results: &mut AnalysisResults) {
     results.gc_count += bytecount::count(line, b'G')
         + bytecount::count(line, b'g')
         + bytecount::count(line, b'C')
         + bytecount::count(line, b'c');
     results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
-    if line.ends_with(b"\n") {
-        line.len() - offset // Exclude the newline character
-    } else {
-        line.len()
-    }
 }
 
 fn process_buffer(
@@ -307,7 +339,13 @@ fn process_buffer(
             current_sequence_length = 0;
              // Start new sequence
         } else {
-            current_sequence_length += process_sequence_line(line, results, offset);
+            update_stats(line, results);
+            let len = line.len();
+            current_sequence_length += if line.ends_with(b"\n") {
+                len - offset
+            } else {
+                len
+            };
         }
         
         i = line_end;
@@ -317,7 +355,7 @@ fn process_buffer(
         lengths.push(current_sequence_length);
     }
     
-    calc_nq_stats(lengths, results);
+    results.calculate_stats(lengths);
     Ok(())
 }
 
