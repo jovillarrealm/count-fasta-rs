@@ -16,16 +16,12 @@ panic = 'unwind'
 incremental = false
 codegen-units = 1
 rpath = false
+feature = "runtime-dispatch-simd"
 
 [profile.profiling]
 inherits = "release"
 debug = true
 
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = true
-feature = "runtime-dispatch-simd"
 
 [dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
