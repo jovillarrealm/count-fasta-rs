@@ -6,13 +6,18 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use liblzma::read::XzDecoder;
+use memchr::memchr;
+use memmap2::Mmap;
 use noodles_bgzf as bgzf;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use zip::read::ZipArchive;
-use memchr::memchr;
-use memmap2::Mmap;
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 pub const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
 pub const VALID_COMPRESSION: [&str; 7] = ["gz", "xz", "bz2", "bgz", "bgzip", "zip", "naf"];
@@ -71,6 +76,36 @@ impl AnalysisResults {
     }
 }
 
+pub fn open_file<P: AsRef<Path>>(path: P) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+
+    #[cfg(windows)]
+    {
+        const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x08000000;
+        options.attributes(FILE_FLAG_SEQUENTIAL_SCAN);
+    }
+
+    let file = options.open(path)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn fcntl(
+                fd: std::os::raw::c_int,
+                cmd: std::os::raw::c_int,
+                arg: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        const F_RDAHEAD: std::os::raw::c_int = 45;
+        unsafe {
+            fcntl(file.as_raw_fd(), F_RDAHEAD, 1);
+        }
+    }
+
+    Ok(file)
+}
+
 pub fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
     process_decoded_stream(file, buffer_size, XzDecoder::new)
 }
@@ -91,48 +126,56 @@ pub fn process_fasta_file(
     buffer_size: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
-    let file = File::open(file)?;
-    
+    let file = open_file(file)?;
+
     // Try to use mmap, fallback to BufReader if it fails (e.g. empty file or special file)
     let mmap_result = unsafe { Mmap::map(&file) };
-    
+
     match mmap_result {
         Ok(mmap) => {
             #[cfg(unix)]
             mmap.advise(memmap2::Advice::Sequential)?;
+
+            #[cfg(target_os = "linux")]
+            mmap.advise(memmap2::Advice::HugePage)?;
+
             process_buffer(&mmap, &mut results)?;
         }
         Err(_) => {
-            // Re-open or just use the existing file handle if possible, 
+            // Re-open or just use the existing file handle if possible,
             // but File definition in map consumes it? No, map takes &File.
-            // But we need to reset position if we read from it? 
+            // But we need to reset position if we read from it?
             // We haven't read from it yet.
             println!("Failed to mmap file: {:?}", file);
             let reader = BufReader::with_capacity(buffer_size, file);
             process_reader(reader, &mut results)?;
         }
     }
-    
+
     Ok(vec![results])
 }
 
 pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
-    let decoder = nafcodec::Decoder::from_path(file)
-        .expect("failed to open nucleotide archive");
+    let decoder = nafcodec::Decoder::from_path(file).expect("failed to open nucleotide archive");
 
     // Process naf file
     let mut lengths = Vec::with_capacity(250);
 
-
     for may_seq in decoder {
         let seq = may_seq.unwrap_or_else(|_| panic!("{file:?} had bad data"));
-        let seq_length = usize::try_from(seq.length.unwrap_or_else(|| panic!("naf file had empty seq on {file:?}?"))).unwrap_or_else(|_| panic!("failed to turn u64 to usize on {file:?}"));
+        let seq_length = usize::try_from(
+            seq.length
+                .unwrap_or_else(|| panic!("naf file had empty seq on {file:?}?")),
+        )
+        .unwrap_or_else(|_| panic!("failed to turn u64 to usize on {file:?}"));
         results.total_length += seq_length;
         results.largest_contig = results.largest_contig.max(seq_length);
         results.shortest_contig = results.shortest_contig.min(seq_length);
         lengths.push(seq_length);
-        let line = seq.sequence.unwrap_or_else(|| panic!("naf sequence had bad data {file:?}"));
+        let line = seq
+            .sequence
+            .unwrap_or_else(|| panic!("naf sequence had bad data {file:?}"));
         update_stats(line.as_bytes(), &mut results);
     }
     results.sequence_count = lengths.len();
@@ -155,7 +198,7 @@ where
     F: Fn(File) -> D,
 {
     let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
-    let file = File::open(file)?;
+    let file = open_file(file)?;
     let decoder = decoder_factory(file);
     let reader = BufReader::with_capacity(buffer_size, decoder);
     process_reader(reader, &mut results)?;
@@ -163,7 +206,7 @@ where
 }
 
 pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    let file = File::open(file)?;
+    let file = open_file(file)?;
     let buf_reader = BufReader::with_capacity(buffer_size, file);
     let mut archive = ZipArchive::new(buf_reader)?;
     let mut all_results = Vec::new();
@@ -173,11 +216,13 @@ pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<
         if zip_file.is_file() {
             let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
-                let mut result = AnalysisResults::new(Path::new(&file_name)
+                let mut result = AnalysisResults::new(
+                    Path::new(&file_name)
                         .file_name()
                         .unwrap()
                         .to_string_lossy()
-                        .to_string());
+                        .to_string(),
+                );
                 let reader = BufReader::with_capacity(buffer_size, zip_file);
                 if let Err(e) = process_reader(reader, &mut result) {
                     eprintln!("Error processing {file_name}: {e}");
@@ -223,7 +268,9 @@ fn process_reader<R: Read>(
     loop {
         let buf = reader.fill_buf()?;
         let len = buf.len();
-        if len == 0 { break; }
+        if len == 0 {
+            break;
+        }
 
         let mut consumed = 0;
 
@@ -236,8 +283,8 @@ fn process_reader<R: Read>(
             }
 
             if in_header {
-                 // Scan for end of header (newline)
-                 match memchr(b'\n', &buf[consumed..]) {
+                // Scan for end of header (newline)
+                match memchr(b'\n', &buf[consumed..]) {
                     Some(pos) => {
                         consumed += pos + 1;
                         start_of_line = true;
@@ -252,20 +299,20 @@ fn process_reader<R: Read>(
                 // In sequence
                 match memchr(b'\n', &buf[consumed..]) {
                     Some(pos) => {
-                         let end = consumed + pos + 1;
-                         let chunk = &buf[consumed..end];
-                         update_stats(chunk, results);
-                         current_sequence_length += chunk.len().saturating_sub(offset);
-                         
-                         consumed = end;
-                         start_of_line = true;
+                        let end = consumed + pos + 1;
+                        let chunk = &buf[consumed..end];
+                        update_stats(chunk, results);
+                        current_sequence_length += chunk.len().saturating_sub(offset);
+
+                        consumed = end;
+                        start_of_line = true;
                     }
                     None => {
                         // Entire buffer is sequence data (no newline)
                         let chunk = &buf[consumed..];
                         update_stats(chunk, results);
                         current_sequence_length += chunk.len();
-                        
+
                         consumed = len;
                         start_of_line = false;
                     }
@@ -291,30 +338,27 @@ fn update_stats(line: &[u8], results: &mut AnalysisResults) {
     results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
 }
 
-fn process_buffer(
-    data: &[u8],
-    results: &mut AnalysisResults,
-) -> std::io::Result<()> {
+fn process_buffer(data: &[u8], results: &mut AnalysisResults) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
-    
+
     let mut i = 0;
     let len = data.len();
-    
+
     // Check if empty
     if len == 0 {
         return Ok(());
     }
-    
+
     // find first newline
     let first_newline = match memchr(b'\n', &data[i..]) {
         Some(pos) => pos + i,
         None => return Ok(()), // No newline found
     };
-    
+
     let first_line = &data[i..=first_newline];
     results.sequence_count += 1;
-    
+
     let offset = if first_line.ends_with(b"\r\n") {
         2
     } else if first_line.ends_with(b"\n") {
@@ -322,22 +366,26 @@ fn process_buffer(
     } else {
         0
     };
-    
+
     i = first_newline + 1;
-    
+
     while i < len {
         let next_newline = match memchr(b'\n', &data[i..]) {
             Some(pos) => pos + i,
             None => len - 1,
         };
-        
-        let line_end = if next_newline < len { next_newline + 1 } else { len };
+
+        let line_end = if next_newline < len {
+            next_newline + 1
+        } else {
+            len
+        };
         let line = &data[i..line_end];
-        
+
         if line.first() == Some(&b'>') {
             lengths.push(current_sequence_length);
             current_sequence_length = 0;
-             // Start new sequence
+            // Start new sequence
         } else {
             update_stats(line, results);
             let len = line.len();
@@ -347,16 +395,14 @@ fn process_buffer(
                 len
             };
         }
-        
+
         i = line_end;
     }
-    
+
     if current_sequence_length > 0 {
         lengths.push(current_sequence_length);
     }
-    
+
     results.calculate_stats(lengths);
     Ok(())
 }
-
-
