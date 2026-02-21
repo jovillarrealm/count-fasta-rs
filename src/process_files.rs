@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 use liblzma::read::XzDecoder;
 use memchr::memchr;
 use memmap2::Mmap;
-use noodles_bgzf as bgzf;
+use noodles::bgzf as bgzf;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;

@@ -263,8 +263,57 @@ unsafe fn update_stats_neon(line: &[u8]) -> (usize, usize, usize) {
 mod tests {
     use super::*;
 
+    // Simple Xorshift RNG for testing without extra dependencies
+    struct SimpleRng {
+        state: u64,
+    }
+
+    impl SimpleRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_u8(&mut self) -> u8 {
+            self.state ^= self.state << 13;
+            self.state ^= self.state >> 7;
+            self.state ^= self.state << 17;
+            (self.state & 0xFF) as u8
+        }
+
+        fn fill_bytes(&mut self, buf: &mut [u8]) {
+            for b in buf.iter_mut() {
+                *b = self.next_u8();
+            }
+        }
+    }
+
+    fn check_consistency(input: &[u8]) {
+        let scalar_res = update_stats_scalar(input);
+        let dispatch_res = update_stats(input);
+        
+        assert_eq!(scalar_res, dispatch_res, "Dispatched result should match scalar result for len {}", input.len());
+        
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("avx2") {
+            let avx2_res = unsafe { update_stats_avx2(input) };
+            assert_eq!(scalar_res, avx2_res, "AVX2 result should match scalar result for len {}", input.len());
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("avx512bw") {
+             let avx512_res = unsafe { update_stats_avx512(input) };
+             assert_eq!(scalar_res, avx512_res, "AVX512 result should match scalar result for len {}", input.len());
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            let neon_res = unsafe { update_stats_neon(input) };
+            assert_eq!(scalar_res, neon_res, "NEON result should match scalar result for len {}", input.len());
+        }
+    }
+
     #[test]
-    fn test_update_stats_consistency() {
+    fn test_update_stats_consistency_basic() {
         let patterns: Vec<&[u8]> = vec![
             b"AaCcGgTtNnRrYyWwSsMmKkHhBbVvDd-. \t\n\r",
             b"G",
@@ -276,28 +325,82 @@ mod tests {
         ];
 
         for input in patterns {
-            let scalar_res = update_stats_scalar(input);
-            let dispatch_res = update_stats(input);
+            check_consistency(input);
+        }
+    }
+
+    #[test]
+    fn test_fuzz_update_stats() {
+        let mut rng = SimpleRng::new(12345);
+        for _ in 0..100 {
+            // Generate random length up to ~1MB
+            // (0..255 * 4096) + (0..255 * 16) + (0..255)
+            let len = (rng.next_u8() as usize) * 4096 
+                    + (rng.next_u8() as usize) * 16 
+                    + (rng.next_u8() as usize); 
             
-            assert_eq!(scalar_res, dispatch_res, "Dispatched result should match scalar result for pattern {:?}", std::str::from_utf8(input));
+            let mut buf = vec![0u8; len];
+            rng.fill_bytes(&mut buf);
             
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            if is_x86_feature_detected!("avx2") {
-                let avx2_res = unsafe { update_stats_avx2(input) };
-                assert_eq!(scalar_res, avx2_res, "AVX2 result should match scalar result");
+            // Constrain bytes to likely FASTA characters to test specific logic paths
+            for b in buf.iter_mut() {
+                let r = *b % 20;
+                *b = match r {
+                    0..=3 => b'G',
+                    4..=7 => b'C', 
+                    8..=9 => b'N',
+                    10 => b'n',
+                    11 => b'g',
+                    12 => b'c',
+                    13 => b'\n',
+                    14 => b' ',
+                    15 => b'-',
+                    _ => b'A', // Other chars
+                };
             }
 
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            if is_x86_feature_detected!("avx512bw") {
-                 let avx512_res = unsafe { update_stats_avx512(input) };
-                 assert_eq!(scalar_res, avx512_res, "AVX512 result should match scalar result");
-            }
+            check_consistency(&buf);
+        }
+    }
 
-            #[cfg(target_arch = "aarch64")]
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                let neon_res = unsafe { update_stats_neon(input) };
-                assert_eq!(scalar_res, neon_res, "NEON result should match scalar result");
+    #[test]
+    fn test_alignment_and_offsets() {
+        // Allocate a larger buffer to play with alignments and larger chunks
+        let mut base_buf = vec![b'A'; 4096 * 4]; 
+        // Fill with some pattern
+        for (i, b) in base_buf.iter_mut().enumerate() {
+            if i % 3 == 0 { *b = b'G'; }
+            if i % 5 == 0 { *b = b'N'; }
+            if i % 7 == 0 { *b = b'\n'; }
+        }
+
+        // Test various sub-slices to force different alignments and head/tail combinations
+        // align_to depends on the pointer address, so iterating offsets is crucial.
+        for start in 0..64 {
+            // Check lengths up to 512 bytes to cover multiple vector widths
+            for len in 0..512 {
+                if start + len > base_buf.len() { break; }
+                let slice = &base_buf[start..start+len];
+                check_consistency(slice);
             }
+        }
+    }
+
+    #[test]
+    fn test_vector_boundaries() {
+        let max_vec_size = 64; // AVX512 is 64 bytes
+        let base_buf = vec![b'G'; max_vec_size * 3];
+
+        // Test lengths around vector sizes
+        for size in [16, 32, 64] {
+            if size * 2 > base_buf.len() { continue; }
+            
+            check_consistency(&base_buf[0..size]);        // Exact size
+            check_consistency(&base_buf[0..size - 1]);    // Size - 1
+            check_consistency(&base_buf[0..size + 1]);    // Size + 1
+            check_consistency(&base_buf[0..size * 2]);    // Double size
+            check_consistency(&base_buf[0..size * 2 - 1]);
+            check_consistency(&base_buf[0..size * 2 + 1]);
         }
     }
 }

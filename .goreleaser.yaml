@@ -13,13 +13,14 @@ before:
     # if you don't do these things before calling goreleaser, it might be a
     # good idea to do them here:
     - rustup default stable
-    - cargo install --locked cargo-zigbuild
+    # - cargo install --locked cargo-zigbuild # Not needed if using cross
     - sh -c 'command -v cross > /dev/null || cargo install cross'
     - ./scripts/test_simd_cross.sh
     - cargo fetch --locked
 
 builds:
   - builder: rust
+    tool: cross
     flags:
       - --release
     targets:
