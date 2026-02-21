@@ -403,4 +403,39 @@ mod tests {
             check_consistency(&base_buf[0..size * 2 + 1]);
         }
     }
+
+    #[test]
+    fn test_resilience_random_junk() {
+        let mut rng = SimpleRng::new(9999);
+        // Test with completely random junk (0-255) to ensure no crashes on invalid ASCII/UTF-8
+        for _ in 0..100 {
+            let len = (rng.next_u8() as usize) * 64 + (rng.next_u8() as usize);
+            let mut buf = vec![0u8; len];
+            rng.fill_bytes(&mut buf);
+            check_consistency(&buf);
+        }
+    }
+
+    #[test]
+    fn test_resilience_edge_cases() {
+        let edge_cases: Vec<&[u8]> = vec![
+            // Embedded nulls
+            b"ACGT\0ACGT", 
+            b"\0\0\0",
+            // High bit set (extended ASCII / invalid UTF-8 start bytes)
+            b"ACGT\xFF\x80ACGT",
+            // All control characters
+            b"\x01\x02\x03\n\r\t\x0B\x0C",
+            // "Oops all headers" like pattern (though logic doesn't parse headers here, just stats)
+            b">seq1\n>seq2\n>seq3",
+            // Just whitespace
+            b"   \t\t\n\n\r\r",
+            // Alternating valid/invalid tightly
+            b"AgC\xFFT\x00N-",
+        ];
+
+        for case in edge_cases {
+            check_consistency(case);
+        }
+    }
 }
