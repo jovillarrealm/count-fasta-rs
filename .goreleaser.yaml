@@ -53,7 +53,9 @@ changelog:
 
 release:
   footer: >-
-    Luv, javm
+  
+    
+    
     ---
 
-    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).
+    Released with [cross](https://crates.io/crates/cross) and [GoReleaser](https://github.com/goreleaser/goreleaser).

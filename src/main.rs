@@ -136,7 +136,10 @@ fn main() {
     let results = process_files(files_to_process, args.threads, args.no_simd);
 
     if let Some(csv_file) = args.csv {
-        append_to_csv(&results, &csv_file).expect("Failed to write CSV");
+        if let Err(e) = append_to_csv(&results, &csv_file) {
+            eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
+            std::process::exit(1);
+        }
     } else {
         for result in results {
             print_results(&result, args.legacy);
@@ -149,9 +152,7 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()).is_some_and(|ext| {
-            process_files::VALID_FILES.contains(&ext) || process_files::VALID_COMPRESSION.contains(&ext)
-        }) {
+        if path.is_file() && process_files::FileFormat::from_path(&path) != process_files::FileFormat::Unknown {
             files.push(path);
         }
     }
@@ -173,22 +174,7 @@ fn process_files(
         files
             .par_iter()
             .flat_map(|file| {
-                let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let res = match ext {
-                    "gz" => process_files::process_gz_file(file, buffer_size, no_simd),
-                    "zip" => process_files::process_zip_file(file, buffer_size, no_simd),
-                    "xz" => process_files::process_xz_file(file, buffer_size, no_simd),
-                    "bz2" => process_files::process_bz2_file(file, buffer_size, no_simd),
-                    "bgz" | "bgzip" => {
-                        process_files::process_bgzip_file(file, buffer_size, no_simd)
-                    }
-                    "naf" => process_files::process_naf_file(file, no_simd),
-                    _ if process_files::VALID_FILES.contains(&ext) => {
-                        process_files::process_fasta_file(file, buffer_size, no_simd)
-                    }
-                    _ => Ok(Vec::new()),
-                };
-                match res {
+                match process_files::process_any_file(file, buffer_size, no_simd) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("Error processing file {:?}: {}", file, e);

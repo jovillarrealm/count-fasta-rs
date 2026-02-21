@@ -20,7 +20,141 @@ use std::os::unix::io::AsRawFd;
 use std::os::windows::fs::OpenOptionsExt;
 
 pub const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
-pub const VALID_COMPRESSION: [&str; 7] = ["gz", "xz", "bz2", "bgz", "bgzip", "zip", "naf"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFormat {
+    Fasta,
+    Gzip,
+    Xz,
+    Bzip2,
+    Bgzip,
+    Zip,
+    Naf,
+    Unknown,
+}
+
+impl FileFormat {
+    pub fn from_path(path: &Path) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("gz") => FileFormat::Gzip,
+            Some("xz") => FileFormat::Xz,
+            Some("bz2") => FileFormat::Bzip2,
+            Some("bgz") | Some("bgzip") => FileFormat::Bgzip,
+            Some("zip") => FileFormat::Zip,
+            Some("naf") => FileFormat::Naf,
+            Some(ext) if VALID_FILES.contains(&ext) => FileFormat::Fasta,
+            _ => FileFormat::Unknown,
+        }
+    }
+}
+
+pub fn process_any_file(
+    file: &Path,
+    buffer_size: usize,
+    no_simd: bool,
+) -> std::io::Result<Vec<AnalysisResults>> {
+    match FileFormat::from_path(file) {
+        FileFormat::Gzip => process_gz_file(file, buffer_size, no_simd),
+        FileFormat::Zip => process_zip_file(file, buffer_size, no_simd),
+        FileFormat::Xz => process_xz_file(file, buffer_size, no_simd),
+        FileFormat::Bzip2 => process_bz2_file(file, buffer_size, no_simd),
+        FileFormat::Bgzip => process_bgzip_file(file, buffer_size, no_simd),
+        FileFormat::Naf => process_naf_file(file, no_simd),
+        FileFormat::Fasta => process_fasta_file(file, buffer_size, no_simd),
+        FileFormat::Unknown => Ok(Vec::new()),
+    }
+}
+
+struct FastaParser {
+    lengths: Vec<usize>,
+    current_sequence_length: usize,
+    in_header: bool,
+    last_char_was_newline: bool,
+    started: bool,
+}
+
+impl FastaParser {
+    fn new() -> Self {
+        Self {
+            lengths: Vec::with_capacity(250),
+            current_sequence_length: 0,
+            in_header: false,
+            last_char_was_newline: true, // To catch the very first '>'
+            started: false,
+        }
+    }
+
+    fn feed(&mut self, data: &[u8], results: &mut AnalysisResults, no_simd: bool) {
+        let mut consumed = 0;
+        let len = data.len();
+        while consumed < len {
+            if self.in_header {
+                // Find end of header
+                match memchr(b'\n', &data[consumed..]) {
+                    Some(pos) => {
+                        consumed += pos + 1;
+                        self.in_header = false;
+                        self.last_char_was_newline = true;
+                    }
+                    None => {
+                        consumed = len;
+                        self.last_char_was_newline = false;
+                        // Still in header for next buffer
+                    }
+                }
+            } else {
+                // In sequence
+                if self.last_char_was_newline && data[consumed] == b'>' {
+                    // Start of a new header
+                    if self.started {
+                        self.lengths.push(self.current_sequence_length);
+                        self.current_sequence_length = 0;
+                    }
+                    results.sequence_count += 1;
+                    self.started = true;
+                    self.in_header = true;
+                    consumed += 1;
+                    self.last_char_was_newline = false;
+                } else {
+                    // Still in sequence, look for the next '\n>'
+                    let mut next_header_start = None;
+                    let mut search_pos = consumed;
+                    while let Some(pos) = memchr(b'\n', &data[search_pos..]) {
+                        let actual_pos = search_pos + pos;
+                        if actual_pos + 1 < len {
+                            if data[actual_pos + 1] == b'>' {
+                                next_header_start = Some(actual_pos);
+                                break;
+                            }
+                        } else {
+                            // \n is the last char, need to check next buffer
+                            break;
+                        }
+                        search_pos = actual_pos + 1;
+                    }
+
+                    let (chunk, chunk_end, new_last_newline) = match next_header_start {
+                        Some(pos) => (&data[consumed..pos], pos + 1, true),
+                        None => (&data[consumed..len], len, data[len - 1] == b'\n'),
+                    };
+
+                    if self.started {
+                        self.current_sequence_length += update_stats(chunk, results, no_simd);
+                    }
+                    consumed = chunk_end;
+                    self.last_char_was_newline = new_last_newline;
+                }
+            }
+        }
+    }
+
+    fn finish(mut self, results: &mut AnalysisResults) {
+        if self.current_sequence_length > 0 {
+            self.lengths.push(self.current_sequence_length);
+        }
+        results.calculate_stats(self.lengths);
+    }
+}
 
 #[derive(Default, Clone, Debug)]
 pub struct AnalysisResults {
@@ -46,6 +180,14 @@ impl AnalysisResults {
             shortest_contig: usize::MAX,
             ..Default::default()
         }
+    }
+
+    pub fn for_path(path: &Path) -> Self {
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
+        Self::new(filename)
     }
 
     pub fn calculate_stats(&mut self, mut lengths: Vec<usize>) {
@@ -138,7 +280,7 @@ pub fn process_fasta_file(
     buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
+    let mut results = AnalysisResults::for_path(file);
     let file = open_file(file)?;
 
     // Try to use mmap, fallback to BufReader if it fails (e.g. empty file or special file)
@@ -165,26 +307,27 @@ pub fn process_fasta_file(
 }
 
 pub fn process_naf_file(file: &Path, no_simd: bool) -> std::io::Result<Vec<AnalysisResults>> {
-    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
-    let decoder = nafcodec::Decoder::from_path(file).expect("failed to open nucleotide archive");
+    let mut results = AnalysisResults::for_path(file);
+    let decoder = nafcodec::Decoder::from_path(file)
+        .map_err(|e| std::io::Error::other(format!("failed to open nucleotide archive: {e}")))?;
 
     // Process naf file
     let mut lengths = Vec::with_capacity(250);
 
     for may_seq in decoder {
-        let seq = may_seq.unwrap_or_else(|_| panic!("{file:?} had bad data"));
+        let seq = may_seq.map_err(|e| std::io::Error::other(format!("{file:?} had bad data: {e}")))?;
         let seq_length = usize::try_from(
             seq.length
-                .unwrap_or_else(|| panic!("naf file had empty seq on {file:?}?")),
+                .ok_or_else(|| std::io::Error::other(format!("naf file had empty seq on {file:?}?")))?,
         )
-        .unwrap_or_else(|_| panic!("failed to turn u64 to usize on {file:?}"));
+        .map_err(|e| std::io::Error::other(format!("failed to turn u64 to usize on {file:?}: {e}")))?;
         results.total_length += seq_length;
         results.largest_contig = results.largest_contig.max(seq_length);
         results.shortest_contig = results.shortest_contig.min(seq_length);
         lengths.push(seq_length);
         let line = seq
             .sequence
-            .unwrap_or_else(|| panic!("naf sequence had bad data {file:?}"));
+            .ok_or_else(|| std::io::Error::other(format!("naf sequence had bad data {file:?}")))?;
         update_stats(line.as_bytes(), &mut results, no_simd);
     }
     results.sequence_count = lengths.len();
@@ -211,7 +354,7 @@ where
     D: Read,
     F: Fn(File) -> D,
 {
-    let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
+    let mut results = AnalysisResults::for_path(file);
     let file = open_file(file)?;
     let decoder = decoder_factory(file);
     let reader = BufReader::with_capacity(buffer_size, decoder);
@@ -259,87 +402,19 @@ fn process_reader<R: Read>(
     results: &mut AnalysisResults,
     no_simd: bool,
 ) -> std::io::Result<()> {
-    let mut lengths = Vec::with_capacity(250);
-    let mut current_sequence_length = 0;
-    let mut in_header = false;
-    let mut last_char_was_newline = true; // To catch the very first '>'
-    let mut started = false;
+    let mut parser = FastaParser::new();
 
     loop {
         let buf = reader.fill_buf()?;
-        let len = buf.len();
-        if len == 0 {
+        if buf.is_empty() {
             break;
         }
-
-        let mut consumed = 0;
-        while consumed < len {
-            if in_header {
-                // Find end of header
-                match memchr(b'\n', &buf[consumed..]) {
-                    Some(pos) => {
-                        consumed += pos + 1;
-                        in_header = false;
-                        last_char_was_newline = true;
-                    }
-                    None => {
-                        consumed = len;
-                        last_char_was_newline = false;
-                        // Still in header for next buffer
-                    }
-                }
-            } else {
-                // In sequence
-                if last_char_was_newline && buf[consumed] == b'>' {
-                    // Start of a new header
-                    if started {
-                        lengths.push(current_sequence_length);
-                        current_sequence_length = 0;
-                    }
-                    results.sequence_count += 1;
-                    started = true;
-                    in_header = true;
-                    consumed += 1;
-                    last_char_was_newline = false;
-                } else {
-                    // Still in sequence, look for the next '\n>'
-                    let mut next_header_start = None;
-                    let mut search_pos = consumed;
-                    while let Some(pos) = memchr(b'\n', &buf[search_pos..]) {
-                        let actual_pos = search_pos + pos;
-                        if actual_pos + 1 < len {
-                            if buf[actual_pos + 1] == b'>' {
-                                next_header_start = Some(actual_pos);
-                                break;
-                            }
-                        } else {
-                            // \n is the last char, need to check next buffer
-                            break;
-                        }
-                        search_pos = actual_pos + 1;
-                    }
-
-                    let (chunk, chunk_end, new_last_newline) = match next_header_start {
-                        Some(pos) => (&buf[consumed..pos], pos + 1, true),
-                        None => (&buf[consumed..len], len, buf[len - 1] == b'\n'),
-                    };
-
-                    if started {
-                        current_sequence_length += update_stats(chunk, results, no_simd);
-                    }
-                    consumed = chunk_end;
-                    last_char_was_newline = new_last_newline;
-                }
-            }
-        }
+        parser.feed(buf, results, no_simd);
+        let consumed = buf.len();
         reader.consume(consumed);
     }
 
-    if current_sequence_length > 0 {
-        lengths.push(current_sequence_length);
-    }
-
-    results.calculate_stats(lengths);
+    parser.finish(results);
     Ok(())
 }
 
@@ -355,64 +430,16 @@ fn process_buffer(
     results: &mut AnalysisResults,
     no_simd: bool,
 ) -> std::io::Result<()> {
-    let mut lengths = Vec::with_capacity(250);
-    let mut pos = 0;
-    let len = data.len();
-
-    // Find the first header
-    while pos < len {
-        if data[pos] == b'>' {
-            break;
-        }
-        pos += 1;
-    }
-
-    while pos < len {
-        // We are at the start of a header ('>')
-        results.sequence_count += 1;
-        
-        // Find end of header line
-        if let Some(nl_pos) = memchr(b'\n', &data[pos..]) {
-            pos += nl_pos + 1;
-        } else {
-            // Header is the last line and has no sequence?
-            pos = len;
-            continue;
-        }
-
-        // Now we are at the start of the sequence data
-        // Find the start of the next header ('\n>')
-        let next_header = find_next_header_start(&data[pos..]);
-        
-        let (chunk, chunk_end) = match next_header {
-            Some(offset) => (&data[pos..pos + offset], pos + offset + 1), // skip the '\n' but stay at '>'
-            None => (&data[pos..], len),
-        };
-
-        let current_sequence_length = update_stats(chunk, results, no_simd);
-        lengths.push(current_sequence_length);
-        pos = chunk_end;
-    }
-
-    results.calculate_stats(lengths);
+    let mut parser = FastaParser::new();
+    parser.feed(data, results, no_simd);
+    parser.finish(results);
     Ok(())
-}
-
-fn find_next_header_start(data: &[u8]) -> Option<usize> {
-    let mut search_pos = 0;
-    while let Some(nl_pos) = memchr(b'\n', &data[search_pos..]) {
-        let actual_pos = search_pos + nl_pos;
-        if actual_pos + 1 < data.len() && data[actual_pos + 1] == b'>' {
-            return Some(actual_pos);
-        }
-        search_pos = actual_pos + 1;
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_calculate_stats() {
@@ -582,5 +609,78 @@ mod tests {
         // 2. Total length: 4 (ATGC) + 4 (AAAA) + 4 (GGGG) = 12
         assert_eq!(results.total_length, 12);
         assert_eq!(results.sequence_count, 3); 
+    }
+
+    #[test]
+    fn test_process_missing_file() {
+        let path = Path::new("non_existent_file.fa");
+        let res = process_fasta_file(path, 1024, false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_process_reader_io_error() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "forced failure"))
+            }
+        }
+        let reader = BufReader::new(FailingReader);
+        let mut results = AnalysisResults::new("failing".to_string());
+        let res = process_reader(reader, &mut results, false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_process_corrupted_gz() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("corrupted.gz");
+        fs::write(&temp_file, b"this is not a valid gzip file").unwrap();
+        let res = process_gz_file(&temp_file, 1024, false);
+        assert!(res.is_err());
+        let _ = fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn test_process_corrupted_xz() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("corrupted.xz");
+        fs::write(&temp_file, b"this is not a valid xz file").unwrap();
+        let res = process_xz_file(&temp_file, 1024, false);
+        assert!(res.is_err());
+        let _ = fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn test_process_corrupted_zip() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("corrupted.zip");
+        fs::write(&temp_file, b"this is not a valid zip file").unwrap();
+        let res = process_zip_file(&temp_file, 1024, false);
+        assert!(res.is_err());
+        let _ = fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn test_mmap_fallback_empty_file() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("empty_mmap.fa");
+        fs::write(&temp_file, b"").unwrap();
+        let res = process_fasta_file(&temp_file, 1024, false);
+        assert!(res.is_ok());
+        let results = res.unwrap();
+        assert_eq!(results[0].sequence_count, 0);
+        let _ = fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn test_process_invalid_naf() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("invalid.naf");
+        fs::write(&temp_file, b"this is not a valid naf file").unwrap();
+        let res = process_naf_file(&temp_file, false);
+        assert!(res.is_err());
+        let _ = fs::remove_file(temp_file);
     }
 }
