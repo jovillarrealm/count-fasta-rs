@@ -1,6 +1,6 @@
 [package]
 name = "count-fasta-rs"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 repository = "https://github.com/jovillarrealm/count-fasta-rs"
 
@@ -16,7 +16,6 @@ panic = 'unwind'
 incremental = false
 codegen-units = 1
 rpath = false
-feature = "runtime-dispatch-simd"
 
 [profile.profiling]
 inherits = "release"
@@ -40,4 +39,5 @@ memmap2 = "0.9"
 memchr = "2.7.4"
 
 [features]
+default = ["runtime-dispatch-simd"]
 runtime-dispatch-simd = ["bytecount/runtime-dispatch-simd"]

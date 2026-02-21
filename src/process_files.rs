@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use zip::read::ZipArchive;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::io::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
@@ -90,7 +90,7 @@ pub fn open_file<P: AsRef<Path>>(path: P) -> std::io::Result<File> {
 
     #[cfg(target_os = "macos")]
     {
-        extern "C" {
+        unsafe extern "C" {
             fn fcntl(
                 fd: std::os::raw::c_int,
                 cmd: std::os::raw::c_int,
