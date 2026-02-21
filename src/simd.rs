@@ -1,4 +1,3 @@
-
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
 
@@ -32,7 +31,11 @@ const LOOKUP: [u8; 256] = {
     table
 };
 
-pub fn update_stats(line: &[u8]) -> (usize, usize, usize) {
+pub fn update_stats(line: &[u8], no_simd: bool) -> (usize, usize, usize) {
+    if no_simd {
+        return update_stats_scalar(line);
+    }
+
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx512bw") {
@@ -289,9 +292,13 @@ mod tests {
 
     fn check_consistency(input: &[u8]) {
         let scalar_res = update_stats_scalar(input);
-        let dispatch_res = update_stats(input);
+        // Test normal dispatch
+        let dispatch_res = update_stats(input, false);
+        assert_eq!(scalar_res, dispatch_res, "Dispatched (SIMD enabled) result should match scalar result for len {}", input.len());
         
-        assert_eq!(scalar_res, dispatch_res, "Dispatched result should match scalar result for len {}", input.len());
+        // Test no_simd flag
+        let no_simd_res = update_stats(input, true);
+        assert_eq!(scalar_res, no_simd_res, "Dispatched (SIMD disabled) result should match scalar result for len {}", input.len());
         
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if is_x86_feature_detected!("avx2") {

@@ -38,54 +38,91 @@ fn determine_buffer_size() -> usize {
 #[clap(
     author,
     version,
-    long_about = "Calculates a dir or a FASTA_FILE and prints its output to stdout.
-Or to a csv file. If the csv file already exists, it appends.
+    about = "A high-performance stream processor for FASTA files.",
+    long_about = "🚀 A high-performance, SIMD-accelerated stream processor for FASTA files.
 
-FASTA_FILE can be .fa .fasta .fna .zip .gz .xz .bz2 .bgz .bgzip
-    
-For example:
-    count-fasta-rs -c stats.csv -d path/GENOMIC
-    count-fasta-rs -c stats.csv genomic*files*.f*a"
+This tool calculates assembly statistics (N50, GC%, total length, etc.) for FASTA files, supporting a wide range of compression formats. It leverages multi-threading (Rayon) and vectorization (AVX2/AVX512/NEON) to process data at maximum speed.
+
+SUPPORTED FORMATS:
+  • Uncompressed: .fa, .fasta, .fna
+  • Compressed:   .gz, .bgz, .bgzip (Block GZIP), .xz, .bz2, .naf (Nucleotide Archive)
+  • Archives:     .zip (processes all valid FASTA files inside)
+
+TUTORIAL & EXAMPLES:
+
+1. Basic Usage (Standard Output)
+   Calculate stats for a single file and print to stdout:
+     $ count-fasta-rs genome.fna
+
+2. Processing Multiple Files
+   Use wildcards to process multiple files at once:
+     $ count-fasta-rs *.fa.gz
+
+3. Directory Processing
+   Process all valid files within a directory (non-recursive). You can specify multiple directories:
+     $ count-fasta-rs -d ./genomes -d ./more_genomes
+
+4. Saving Results to CSV
+   Append results to a CSV file for easy analysis in Excel/Pandas:
+     $ count-fasta-rs -c results.csv -d ./genomes
+   (Note: If 'results.csv' exists, new rows are appended. If not, it's created with a header.)
+
+5. Performance Tuning
+   - Threads: By default, it uses all available cores. Limit this with -t:
+     $ count-fasta-rs -t 4 genome.fna
+   - SIMD: If you encounter issues or want to compare scalar performance:
+     $ count-fasta-rs --no-simd genome.fna
+
+NOTES:
+  - Gzip (.gz) files are assumed to be standard gzip. For random access optimized BGZIP, use .bgz or .bgzip extensions if possible, though .gz works for sequential reading.
+  - The tool uses zero-copy reading where possible (mmap) to keep memory usage low, even for huge files."
 )]
 struct Args {
-    /// Path to csv to be created. It will not create a directories if they don't exist.
+    /// Path to the CSV file to be created or appended to.
     ///
-    /// It will append to the csv file if it already exists.
-    #[clap(short, long)]
+    /// If the file does not exist, it will be created with a header.
+    /// If it exists, new results will be appended.
+    #[clap(short, long, value_hint = clap::ValueHint::FilePath)]
     csv: Option<String>,
 
-    /// Directory to be processed. Non-recursively.
+    /// Directory to process (non-recursive).
     ///
-    /// The program will process all any FASTA_FILE in the path.
-    #[clap(short, long)]
-    directory: Option<String>,
+    /// The program will process all valid FASTA files found in these directories.
+    #[clap(short, long, value_hint = clap::ValueHint::DirPath)]
+    directory: Vec<String>,
 
-    /// Numbers of threads to be used, otherwise the program will decide on its own.
+    /// Number of threads to use.
     ///
-    /// It will decide based on the number of available logical threads, physical cpus, checking cgroups, and number of files
-    /// to be processed. On older machines it probably would default to 1 so it's better to set it manually when running large amounts of data against this.
+    /// If not specified, the program will automatically determine the number of threads based on
+    /// available CPUs and file count.
     #[clap(short, long)]
     threads: Option<usize>,
 
-    /// Legacy output
+    /// Use legacy output format.
     ///
-    /// For debugging and testing purposes.
+    /// Useful for debugging and testing purposes to match older output styles.
     #[clap(short, long)]
     legacy: bool,
 
-    /// FASTA FILE[s] to be processed [wildcards would work here].
+    /// FASTA file(s) to process.
     ///
-    /// Inside a zip file, only .fa .fasta .fna files will be processed.
-    /// gz files are assumed to be compressed using gzip, wrong results can come out of a gz file compressed using bzip
-    #[clap(name = "FASTA FILE")]
+    /// Supports wildcards. Inside a zip file, only .fa, .fasta, and .fna files will be processed.
+    /// Gzip (.gz) files are assumed to be standard gzip; bgzip files should ideally use .bgz or .bgzip.
+    #[clap(name = "FASTA FILE", value_hint = clap::ValueHint::FilePath)]
     files: Vec<String>,
+
+    /// Disable SIMD optimizations (force scalar fallback).
+    ///
+    /// Useful for debugging or if SIMD causes issues on specific hardware.
+    #[clap(long)]
+    no_simd: bool,
 }
 
 fn main() {
     let args = Args::parse();
     let mut files_to_process = Vec::new();
 
-    if let Some(dir) = args.directory {
+    for dir in args.directory {
         match get_fasta_files_from_directory(&dir) {
             Ok(files) => files_to_process.extend(files),
             Err(e) => {
@@ -96,7 +133,7 @@ fn main() {
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
-    let results = process_files(files_to_process, args.threads);
+    let results = process_files(files_to_process, args.threads, args.no_simd);
 
     if let Some(csv_file) = args.csv {
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
@@ -124,6 +161,7 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 fn process_files(
     files: Vec<PathBuf>,
     threads: Option<usize>,
+    no_simd: bool,
 ) -> Vec<process_files::AnalysisResults> {
     let buffer_size = determine_buffer_size();
     let available_threads = determine_threads(&files, threads);
@@ -137,16 +175,16 @@ fn process_files(
             .flat_map(|file| {
                 let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let res = match ext {
-                    "gz" => process_files::process_gz_file(file, buffer_size),
-                    "zip" => process_files::process_zip_file(file, buffer_size),
-                    "xz" => process_files::process_xz_file(file, buffer_size),
-                    "bz2" => process_files::process_bz2_file(file, buffer_size),
+                    "gz" => process_files::process_gz_file(file, buffer_size, no_simd),
+                    "zip" => process_files::process_zip_file(file, buffer_size, no_simd),
+                    "xz" => process_files::process_xz_file(file, buffer_size, no_simd),
+                    "bz2" => process_files::process_bz2_file(file, buffer_size, no_simd),
                     "bgz" | "bgzip" => {
-                        process_files::process_bgzip_file(file, buffer_size)
+                        process_files::process_bgzip_file(file, buffer_size, no_simd)
                     }
-                    "naf" => process_files::process_naf_file(file),
+                    "naf" => process_files::process_naf_file(file, no_simd),
                     _ if process_files::VALID_FILES.contains(&ext) => {
-                        process_files::process_fasta_file(file, buffer_size)
+                        process_files::process_fasta_file(file, buffer_size, no_simd)
                     }
                     _ => Ok(Vec::new()),
                 };
@@ -183,9 +221,14 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
     }
     println!("Total length of sequence:\t{} bp", results.total_length);
     println!("Total number of sequences:\t{}", results.sequence_count);
+    let avg_len = if results.sequence_count > 0 {
+        results.total_length / results.sequence_count
+    } else {
+        0
+    };
     println!(
         "Average contig length is:\t{} bp",
-        results.total_length / results.sequence_count
+        avg_len
     );
     println!("Largest contig:\t\t{} bp", results.largest_contig);
     println!("Shortest contig:\t\t{} bp", results.shortest_contig);
@@ -277,7 +320,7 @@ mod tests {
             files_to_process.extend(files);
         }
 
-        let results = process_files(files_to_process, None);
+        let results = process_files(files_to_process, None, false);
 
         let csv_file = "test/attempt.csv";
         if Path::new(csv_file).exists() {

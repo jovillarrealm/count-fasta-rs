@@ -109,24 +109,34 @@ pub fn open_file<P: AsRef<Path>>(path: P) -> std::io::Result<File> {
     Ok(file)
 }
 
-pub fn process_xz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, XzDecoder::new)
+pub fn process_xz_file(
+    file: &Path,
+    buffer_size: usize,
+    no_simd: bool,
+) -> std::io::Result<Vec<AnalysisResults>> {
+    process_decoded_stream(file, buffer_size, XzDecoder::new, no_simd)
 }
 
-pub fn process_bz2_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, BzDecoder::new)
+pub fn process_bz2_file(
+    file: &Path,
+    buffer_size: usize,
+    no_simd: bool,
+) -> std::io::Result<Vec<AnalysisResults>> {
+    process_decoded_stream(file, buffer_size, BzDecoder::new, no_simd)
 }
 
 pub fn process_bgzip_file(
     file: &Path,
     buffer_size: usize,
+    no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, bgzf::io::Reader::new)
+    process_decoded_stream(file, buffer_size, bgzf::io::Reader::new, no_simd)
 }
 
 pub fn process_fasta_file(
     file: &Path,
     buffer_size: usize,
+    no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
     let file = open_file(file)?;
@@ -142,19 +152,19 @@ pub fn process_fasta_file(
             #[cfg(target_os = "linux")]
             mmap.advise(memmap2::Advice::HugePage)?;
 
-            process_buffer(&mmap, &mut results)?;
+            process_buffer(&mmap, &mut results, no_simd)?;
         }
         Err(_) => {
             println!("Failed to mmap file: {:?}", file);
             let reader = BufReader::with_capacity(buffer_size, file);
-            process_reader(reader, &mut results)?;
+            process_reader(reader, &mut results, no_simd)?;
         }
     }
 
     Ok(vec![results])
 }
 
-pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
+pub fn process_naf_file(file: &Path, no_simd: bool) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::new(file.file_name().unwrap().to_string_lossy().to_string());
     let decoder = nafcodec::Decoder::from_path(file).expect("failed to open nucleotide archive");
 
@@ -175,7 +185,7 @@ pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
         let line = seq
             .sequence
             .unwrap_or_else(|| panic!("naf sequence had bad data {file:?}"));
-        update_stats(line.as_bytes(), &mut results);
+        update_stats(line.as_bytes(), &mut results, no_simd);
     }
     results.sequence_count = lengths.len();
     results.calculate_stats(lengths);
@@ -183,14 +193,19 @@ pub fn process_naf_file(file: &Path) -> std::io::Result<Vec<AnalysisResults>> {
     Ok(vec![results])
 }
 
-pub fn process_gz_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, GzDecoder::new)
+pub fn process_gz_file(
+    file: &Path,
+    buffer_size: usize,
+    no_simd: bool,
+) -> std::io::Result<Vec<AnalysisResults>> {
+    process_decoded_stream(file, buffer_size, GzDecoder::new, no_simd)
 }
 
 fn process_decoded_stream<D, F>(
     file: &Path,
     buffer_size: usize,
     decoder_factory: F,
+    no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>>
 where
     D: Read,
@@ -200,11 +215,15 @@ where
     let file = open_file(file)?;
     let decoder = decoder_factory(file);
     let reader = BufReader::with_capacity(buffer_size, decoder);
-    process_reader(reader, &mut results)?;
+    process_reader(reader, &mut results, no_simd)?;
     Ok(vec![results])
 }
 
-pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<AnalysisResults>> {
+pub fn process_zip_file(
+    file: &Path,
+    buffer_size: usize,
+    no_simd: bool,
+) -> std::io::Result<Vec<AnalysisResults>> {
     let file = open_file(file)?;
     let buf_reader = BufReader::with_capacity(buffer_size, file);
     let mut archive = ZipArchive::new(buf_reader)?;
@@ -223,7 +242,7 @@ pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<
                         .to_string(),
                 );
                 let reader = BufReader::with_capacity(buffer_size, zip_file);
-                if let Err(e) = process_reader(reader, &mut result) {
+                if let Err(e) = process_reader(reader, &mut result, no_simd) {
                     eprintln!("Error processing {file_name}: {e}");
                     continue; // Skip this file but continue processing others
                 };
@@ -238,6 +257,7 @@ pub fn process_zip_file(file: &Path, buffer_size: usize) -> std::io::Result<Vec<
 fn process_reader<R: Read>(
     mut reader: BufReader<R>,
     results: &mut AnalysisResults,
+    no_simd: bool,
 ) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
@@ -305,7 +325,7 @@ fn process_reader<R: Read>(
                     };
 
                     if started {
-                        current_sequence_length += update_stats(chunk, results);
+                        current_sequence_length += update_stats(chunk, results, no_simd);
                     }
                     consumed = chunk_end;
                     last_char_was_newline = new_last_newline;
@@ -323,14 +343,18 @@ fn process_reader<R: Read>(
     Ok(())
 }
 
-fn update_stats(line: &[u8], results: &mut AnalysisResults) -> usize {
-    let (gc, n, seq_chars) = crate::simd::update_stats(line);
+fn update_stats(line: &[u8], results: &mut AnalysisResults, no_simd: bool) -> usize {
+    let (gc, n, seq_chars) = crate::simd::update_stats(line, no_simd);
     results.gc_count += gc;
     results.n_count += n;
     seq_chars
 }
 
-fn process_buffer(data: &[u8], results: &mut AnalysisResults) -> std::io::Result<()> {
+fn process_buffer(
+    data: &[u8],
+    results: &mut AnalysisResults,
+    no_simd: bool,
+) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut pos = 0;
     let len = data.len();
@@ -365,7 +389,7 @@ fn process_buffer(data: &[u8], results: &mut AnalysisResults) -> std::io::Result
             None => (&data[pos..], len),
         };
 
-        let current_sequence_length = update_stats(chunk, results);
+        let current_sequence_length = update_stats(chunk, results, no_simd);
         lengths.push(current_sequence_length);
         pos = chunk_end;
     }
@@ -411,7 +435,7 @@ mod tests {
     #[test]
     fn test_update_stats() {
         let mut results = AnalysisResults::default();
-        update_stats(b"ATGCatgcNNnn", &mut results);
+        update_stats(b"ATGCatgcNNnn", &mut results, false);
         assert_eq!(results.gc_count, 4);
         assert_eq!(results.n_count, 4);
     }
@@ -420,7 +444,7 @@ mod tests {
     fn test_process_buffer() {
         let data = b">seq1\nATGC\n>seq2\nAAAAA\n";
         let mut results = AnalysisResults::new("buffer".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
 
         assert_eq!(results.total_length, 9);
         assert_eq!(results.sequence_count, 2);
@@ -438,7 +462,7 @@ mod tests {
         // Ambiguity: RrYyWwSsMmKkHhBbVvDd
         // Gaps/Noise: - . [space]
         let input = b"AaCcGgTtNnRrYyWwSsMmKkHhBbVvDd-. \t";
-        let seq_len = update_stats(input, &mut results);
+        let seq_len = update_stats(input, &mut results, false);
         
         // G, g, C, c are the only 4 counted as GC
         assert_eq!(results.gc_count, 4);
@@ -454,7 +478,7 @@ mod tests {
         let data = b">seq1\nATGC\r\n>seq2\r\nAAAAA\n";
         let mut results = AnalysisResults::new("mixed".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results).unwrap();
+        process_reader(reader, &mut results, false).unwrap();
 
         assert_eq!(results.total_length, 9);
         assert_eq!(results.sequence_count, 2);
@@ -464,7 +488,7 @@ mod tests {
     fn test_process_buffer_headers_with_gc() {
         let data = b">seq_with_GC_and_N\nATGC\n>next\nNNNN\n";
         let mut results = AnalysisResults::new("headers".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
 
         // Header content should NOT be counted
         assert_eq!(results.gc_count, 2); 
@@ -476,7 +500,7 @@ mod tests {
     fn test_process_with_gaps_and_whitespace() {
         let data = b">seq1\nAT GC\n-..-\nATGC\n";
         let mut results = AnalysisResults::new("gaps".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
 
         // ATGC (4) + ATGC (4) = 8. Gaps and spaces ignored.
         assert_eq!(results.total_length, 8);
@@ -487,7 +511,7 @@ mod tests {
     fn test_process_buffer_crlf() {
         let data = b">seq1\r\nATGC\r\n>seq2\r\nAAAAA\r\n";
         let mut results = AnalysisResults::new("buffer".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
 
         assert_eq!(results.total_length, 9);
         assert_eq!(results.sequence_count, 2);
@@ -497,13 +521,13 @@ mod tests {
     fn test_process_empty() {
         let data = b"";
         let mut results = AnalysisResults::new("empty".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
         assert_eq!(results.total_length, 0);
         assert_eq!(results.sequence_count, 0);
 
         let mut results2 = AnalysisResults::new("empty_reader".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results2).unwrap();
+        process_reader(reader, &mut results2, false).unwrap();
         assert_eq!(results2.total_length, 0);
         assert_eq!(results2.sequence_count, 0);
     }
@@ -512,13 +536,13 @@ mod tests {
     fn test_process_only_header() {
         let data = b">only_header\n";
         let mut results = AnalysisResults::new("only_header".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
         assert_eq!(results.total_length, 0);
         assert_eq!(results.sequence_count, 1);
 
         let mut results2 = AnalysisResults::new("only_header_reader".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results2).unwrap();
+        process_reader(reader, &mut results2, false).unwrap();
         assert_eq!(results2.total_length, 0);
         assert_eq!(results2.sequence_count, 1);
     }
@@ -527,13 +551,13 @@ mod tests {
     fn test_process_no_trailing_newline() {
         let data = b">seq1\nATGC";
         let mut results = AnalysisResults::new("no_newline".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
         assert_eq!(results.total_length, 4);
         assert_eq!(results.sequence_count, 1);
 
         let mut results2 = AnalysisResults::new("no_newline_reader".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results2).unwrap();
+        process_reader(reader, &mut results2, false).unwrap();
         assert_eq!(results2.total_length, 4);
         assert_eq!(results2.sequence_count, 1);
     }
@@ -542,7 +566,7 @@ mod tests {
     fn test_process_lines_before_header() {
         let data = b"some noise\n>seq1\nATGC\n";
         let mut results = AnalysisResults::new("noise".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
         // Noise is now correctly ignored.
         assert_eq!(results.sequence_count, 1);
         assert_eq!(results.total_length, 4);
@@ -552,7 +576,7 @@ mod tests {
     fn test_real_world_complexities() {
         let data = b"; legacy comment line\n>seq1 with spaces\nATGC\n>seq1\nAAAA\n>  seq2\tmetadata\nGGGG\n";
         let mut results = AnalysisResults::new("complex".to_string());
-        process_buffer(data, &mut results).unwrap();
+        process_buffer(data, &mut results, false).unwrap();
 
         // 1. Comment line is ignored. 3 sequences found.
         // 2. Total length: 4 (ATGC) + 4 (AAAA) + 4 (GGGG) = 12
