@@ -49,6 +49,9 @@ impl AnalysisResults {
     }
 
     pub fn calculate_stats(&mut self, mut lengths: Vec<usize>) {
+        if lengths.is_empty() {
+            return;
+        }
         let total_length: usize = lengths.iter().sum();
         self.total_length = total_length;
         self.sequence_count = lengths.len();
@@ -142,10 +145,6 @@ pub fn process_fasta_file(
             process_buffer(&mmap, &mut results)?;
         }
         Err(_) => {
-            // Re-open or just use the existing file handle if possible,
-            // but File definition in map consumes it? No, map takes &File.
-            // But we need to reset position if we read from it?
-            // We haven't read from it yet.
             println!("Failed to mmap file: {:?}", file);
             let reader = BufReader::with_capacity(buffer_size, file);
             process_reader(reader, &mut results)?;
@@ -242,28 +241,9 @@ fn process_reader<R: Read>(
 ) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
     let mut current_sequence_length = 0;
-
-    // Read header line safely to determine offset
-    let mut line = Vec::new(); // Temporary buffer for header only
-    let offset = if reader.read_until(b'\n', &mut line)? > 0 {
-        results.sequence_count += 1;
-        if line.ends_with(b"\r\n") {
-            Some(2)
-        } else if line.ends_with(b"\n") {
-            Some(1)
-        } else {
-            None
-        }
-    } else {
-        return Ok(());
-    };
-
-    let Some(offset) = offset else {
-        return Ok(());
-    };
-
-    let mut start_of_line = true;
     let mut in_header = false;
+    let mut last_char_was_newline = true; // To catch the very first '>'
+    let mut started = false;
 
     loop {
         let buf = reader.fill_buf()?;
@@ -273,49 +253,62 @@ fn process_reader<R: Read>(
         }
 
         let mut consumed = 0;
-
         while consumed < len {
-            // Check start of header
-            if start_of_line && buf[consumed] == b'>' {
-                lengths.push(current_sequence_length);
-                current_sequence_length = 0;
-                in_header = true;
-            }
-
             if in_header {
-                // Scan for end of header (newline)
+                // Find end of header
                 match memchr(b'\n', &buf[consumed..]) {
                     Some(pos) => {
                         consumed += pos + 1;
-                        start_of_line = true;
                         in_header = false;
+                        last_char_was_newline = true;
                     }
                     None => {
                         consumed = len;
-                        start_of_line = false; // Still in header
+                        last_char_was_newline = false;
+                        // Still in header for next buffer
                     }
                 }
             } else {
                 // In sequence
-                match memchr(b'\n', &buf[consumed..]) {
-                    Some(pos) => {
-                        let end = consumed + pos + 1;
-                        let chunk = &buf[consumed..end];
-                        update_stats(chunk, results);
-                        current_sequence_length += chunk.len().saturating_sub(offset);
-
-                        consumed = end;
-                        start_of_line = true;
+                if last_char_was_newline && buf[consumed] == b'>' {
+                    // Start of a new header
+                    if started {
+                        lengths.push(current_sequence_length);
+                        current_sequence_length = 0;
                     }
-                    None => {
-                        // Entire buffer is sequence data (no newline)
-                        let chunk = &buf[consumed..];
-                        update_stats(chunk, results);
-                        current_sequence_length += chunk.len();
-
-                        consumed = len;
-                        start_of_line = false;
+                    results.sequence_count += 1;
+                    started = true;
+                    in_header = true;
+                    consumed += 1;
+                    last_char_was_newline = false;
+                } else {
+                    // Still in sequence, look for the next '\n>'
+                    let mut next_header_start = None;
+                    let mut search_pos = consumed;
+                    while let Some(pos) = memchr(b'\n', &buf[search_pos..]) {
+                        let actual_pos = search_pos + pos;
+                        if actual_pos + 1 < len {
+                            if buf[actual_pos + 1] == b'>' {
+                                next_header_start = Some(actual_pos);
+                                break;
+                            }
+                        } else {
+                            // \n is the last char, need to check next buffer
+                            break;
+                        }
+                        search_pos = actual_pos + 1;
                     }
+
+                    let (chunk, chunk_end, new_last_newline) = match next_header_start {
+                        Some(pos) => (&buf[consumed..pos], pos + 1, true),
+                        None => (&buf[consumed..len], len, buf[len - 1] == b'\n'),
+                    };
+
+                    if started {
+                        current_sequence_length += update_stats(chunk, results);
+                    }
+                    consumed = chunk_end;
+                    last_char_was_newline = new_last_newline;
                 }
             }
         }
@@ -330,79 +323,240 @@ fn process_reader<R: Read>(
     Ok(())
 }
 
-fn update_stats(line: &[u8], results: &mut AnalysisResults) {
-    results.gc_count += bytecount::count(line, b'G')
-        + bytecount::count(line, b'g')
-        + bytecount::count(line, b'C')
-        + bytecount::count(line, b'c');
-    results.n_count += bytecount::count(line, b'N') + bytecount::count(line, b'n');
+fn update_stats(line: &[u8], results: &mut AnalysisResults) -> usize {
+    let (gc, n, seq_chars) = crate::simd::update_stats(line);
+    results.gc_count += gc;
+    results.n_count += n;
+    seq_chars
 }
 
 fn process_buffer(data: &[u8], results: &mut AnalysisResults) -> std::io::Result<()> {
     let mut lengths = Vec::with_capacity(250);
-    let mut current_sequence_length = 0;
-
-    let mut i = 0;
+    let mut pos = 0;
     let len = data.len();
 
-    // Check if empty
-    if len == 0 {
-        return Ok(());
+    // Find the first header
+    while pos < len {
+        if data[pos] == b'>' {
+            break;
+        }
+        pos += 1;
     }
 
-    // find first newline
-    let first_newline = match memchr(b'\n', &data[i..]) {
-        Some(pos) => pos + i,
-        None => return Ok(()), // No newline found
-    };
-
-    let first_line = &data[i..=first_newline];
-    results.sequence_count += 1;
-
-    let offset = if first_line.ends_with(b"\r\n") {
-        2
-    } else if first_line.ends_with(b"\n") {
-        1
-    } else {
-        0
-    };
-
-    i = first_newline + 1;
-
-    while i < len {
-        let next_newline = match memchr(b'\n', &data[i..]) {
-            Some(pos) => pos + i,
-            None => len - 1,
-        };
-
-        let line_end = if next_newline < len {
-            next_newline + 1
+    while pos < len {
+        // We are at the start of a header ('>')
+        results.sequence_count += 1;
+        
+        // Find end of header line
+        if let Some(nl_pos) = memchr(b'\n', &data[pos..]) {
+            pos += nl_pos + 1;
         } else {
-            len
-        };
-        let line = &data[i..line_end];
-
-        if line.first() == Some(&b'>') {
-            lengths.push(current_sequence_length);
-            current_sequence_length = 0;
-            // Start new sequence
-        } else {
-            update_stats(line, results);
-            let len = line.len();
-            current_sequence_length += if line.ends_with(b"\n") {
-                len - offset
-            } else {
-                len
-            };
+            // Header is the last line and has no sequence?
+            pos = len;
+            continue;
         }
 
-        i = line_end;
-    }
+        // Now we are at the start of the sequence data
+        // Find the start of the next header ('\n>')
+        let next_header = find_next_header_start(&data[pos..]);
+        
+        let (chunk, chunk_end) = match next_header {
+            Some(offset) => (&data[pos..pos + offset], pos + offset + 1), // skip the '\n' but stay at '>'
+            None => (&data[pos..], len),
+        };
 
-    if current_sequence_length > 0 {
+        let current_sequence_length = update_stats(chunk, results);
         lengths.push(current_sequence_length);
+        pos = chunk_end;
     }
 
     results.calculate_stats(lengths);
     Ok(())
+}
+
+fn find_next_header_start(data: &[u8]) -> Option<usize> {
+    let mut search_pos = 0;
+    while let Some(nl_pos) = memchr(b'\n', &data[search_pos..]) {
+        let actual_pos = search_pos + nl_pos;
+        if actual_pos + 1 < data.len() && data[actual_pos + 1] == b'>' {
+            return Some(actual_pos);
+        }
+        search_pos = actual_pos + 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_stats() {
+        let mut results = AnalysisResults::new("test.fa".to_string());
+        let lengths = vec![100, 200, 300, 400]; // Total: 1000
+        results.calculate_stats(lengths);
+
+        assert_eq!(results.total_length, 1000);
+        assert_eq!(results.sequence_count, 4);
+        assert_eq!(results.largest_contig, 400);
+        assert_eq!(results.shortest_contig, 100);
+        assert_eq!(results.n25, 400);
+        assert_eq!(results.n25_sequence_count, 1);
+        assert_eq!(results.n50, 300);
+        assert_eq!(results.n50_sequence_count, 2);
+        assert_eq!(results.n75, 200);
+        assert_eq!(results.n75_sequence_count, 3);
+    }
+
+    #[test]
+    fn test_update_stats() {
+        let mut results = AnalysisResults::default();
+        update_stats(b"ATGCatgcNNnn", &mut results);
+        assert_eq!(results.gc_count, 4);
+        assert_eq!(results.n_count, 4);
+    }
+
+    #[test]
+    fn test_process_buffer() {
+        let data = b">seq1\nATGC\n>seq2\nAAAAA\n";
+        let mut results = AnalysisResults::new("buffer".to_string());
+        process_buffer(data, &mut results).unwrap();
+
+        assert_eq!(results.total_length, 9);
+        assert_eq!(results.sequence_count, 2);
+        assert_eq!(results.gc_count, 2);
+        assert_eq!(results.n_count, 0);
+        assert_eq!(results.largest_contig, 5);
+        assert_eq!(results.shortest_contig, 4);
+    }
+
+    #[test]
+    fn test_update_stats_exhaustive() {
+        let mut results = AnalysisResults::default();
+        // Test all possible DNA characters in both cases, including ambiguity codes and gaps
+        // Standard: AaCcGgTtNn
+        // Ambiguity: RrYyWwSsMmKkHhBbVvDd
+        // Gaps/Noise: - . [space]
+        let input = b"AaCcGgTtNnRrYyWwSsMmKkHhBbVvDd-. \t";
+        let seq_len = update_stats(input, &mut results);
+        
+        // G, g, C, c are the only 4 counted as GC
+        assert_eq!(results.gc_count, 4);
+        // N, n are the only 2 counted as N
+        assert_eq!(results.n_count, 2);
+        // Total characters excluding gaps (-.) and whitespace ( \t)
+        // 10 (standard) + 20 (ambiguity) = 30
+        assert_eq!(seq_len, 30);
+    }
+
+    #[test]
+    fn test_process_reader_mixed_line_endings() {
+        let data = b">seq1\nATGC\r\n>seq2\r\nAAAAA\n";
+        let mut results = AnalysisResults::new("mixed".to_string());
+        let reader = BufReader::new(&data[..]);
+        process_reader(reader, &mut results).unwrap();
+
+        assert_eq!(results.total_length, 9);
+        assert_eq!(results.sequence_count, 2);
+    }
+
+    #[test]
+    fn test_process_buffer_headers_with_gc() {
+        let data = b">seq_with_GC_and_N\nATGC\n>next\nNNNN\n";
+        let mut results = AnalysisResults::new("headers".to_string());
+        process_buffer(data, &mut results).unwrap();
+
+        // Header content should NOT be counted
+        assert_eq!(results.gc_count, 2); 
+        assert_eq!(results.n_count, 4);
+        assert_eq!(results.total_length, 8);
+    }
+
+    #[test]
+    fn test_process_with_gaps_and_whitespace() {
+        let data = b">seq1\nAT GC\n-..-\nATGC\n";
+        let mut results = AnalysisResults::new("gaps".to_string());
+        process_buffer(data, &mut results).unwrap();
+
+        // ATGC (4) + ATGC (4) = 8. Gaps and spaces ignored.
+        assert_eq!(results.total_length, 8);
+        assert_eq!(results.gc_count, 4);
+    }
+
+    #[test]
+    fn test_process_buffer_crlf() {
+        let data = b">seq1\r\nATGC\r\n>seq2\r\nAAAAA\r\n";
+        let mut results = AnalysisResults::new("buffer".to_string());
+        process_buffer(data, &mut results).unwrap();
+
+        assert_eq!(results.total_length, 9);
+        assert_eq!(results.sequence_count, 2);
+    }
+
+    #[test]
+    fn test_process_empty() {
+        let data = b"";
+        let mut results = AnalysisResults::new("empty".to_string());
+        process_buffer(data, &mut results).unwrap();
+        assert_eq!(results.total_length, 0);
+        assert_eq!(results.sequence_count, 0);
+
+        let mut results2 = AnalysisResults::new("empty_reader".to_string());
+        let reader = BufReader::new(&data[..]);
+        process_reader(reader, &mut results2).unwrap();
+        assert_eq!(results2.total_length, 0);
+        assert_eq!(results2.sequence_count, 0);
+    }
+
+    #[test]
+    fn test_process_only_header() {
+        let data = b">only_header\n";
+        let mut results = AnalysisResults::new("only_header".to_string());
+        process_buffer(data, &mut results).unwrap();
+        assert_eq!(results.total_length, 0);
+        assert_eq!(results.sequence_count, 1);
+
+        let mut results2 = AnalysisResults::new("only_header_reader".to_string());
+        let reader = BufReader::new(&data[..]);
+        process_reader(reader, &mut results2).unwrap();
+        assert_eq!(results2.total_length, 0);
+        assert_eq!(results2.sequence_count, 1);
+    }
+
+    #[test]
+    fn test_process_no_trailing_newline() {
+        let data = b">seq1\nATGC";
+        let mut results = AnalysisResults::new("no_newline".to_string());
+        process_buffer(data, &mut results).unwrap();
+        assert_eq!(results.total_length, 4);
+        assert_eq!(results.sequence_count, 1);
+
+        let mut results2 = AnalysisResults::new("no_newline_reader".to_string());
+        let reader = BufReader::new(&data[..]);
+        process_reader(reader, &mut results2).unwrap();
+        assert_eq!(results2.total_length, 4);
+        assert_eq!(results2.sequence_count, 1);
+    }
+
+    #[test]
+    fn test_process_lines_before_header() {
+        let data = b"some noise\n>seq1\nATGC\n";
+        let mut results = AnalysisResults::new("noise".to_string());
+        process_buffer(data, &mut results).unwrap();
+        // Noise is now correctly ignored.
+        assert_eq!(results.sequence_count, 1);
+        assert_eq!(results.total_length, 4);
+    }
+
+    #[test]
+    fn test_real_world_complexities() {
+        let data = b"; legacy comment line\n>seq1 with spaces\nATGC\n>seq1\nAAAA\n>  seq2\tmetadata\nGGGG\n";
+        let mut results = AnalysisResults::new("complex".to_string());
+        process_buffer(data, &mut results).unwrap();
+
+        // 1. Comment line is ignored. 3 sequences found.
+        // 2. Total length: 4 (ATGC) + 4 (AAAA) + 4 (GGGG) = 12
+        assert_eq!(results.total_length, 12);
+        assert_eq!(results.sequence_count, 3); 
+    }
 }

@@ -3,6 +3,16 @@
 // at your option. This file may not be copied, modified,
 // or distributed except according to those terms.
 
+//! # count-fasta-rs
+//!
+//! A high-performance stream processor for FASTA files (including compressed formats) 
+//! designed with the following architecture:
+//! - **Low memory usage**: Processes files in chunks to minimize footprint.
+//! - **Zero-copy reads**: Leverages memory mapping and buffered I/O to avoid unnecessary data duplication.
+//! - **One file per core**: Utilizes parallel processing with Rayon, scaling efficiently across available CPUs.
+//! - **Efficient I/O**: Optimizes OS-level read-ahead and sequential access patterns.
+//! - **SIMD optimizations**: Employs AVX2 instructions for rapid sequence analysis and statistics calculation.
+
 use clap::Parser;
 use rayon::prelude::*;
 use std::cmp::{max, min};
@@ -11,8 +21,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 mod process_files;
+mod simd;
 
-extern crate bytecount;
 extern crate num_cpus;
 
 fn determine_buffer_size() -> usize {
@@ -205,45 +215,51 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
 
 fn append_to_csv(results: &[process_files::AnalysisResults], csv_filename: &str) -> io::Result<()> {
     let csv_exists = Path::new(csv_filename).exists();
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(csv_filename)?;
+    let mut writer = std::io::BufWriter::new(file);
 
     if !csv_exists {
         let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
-        file.write_all(header.as_bytes())?;
+        writer.write_all(header.as_bytes())?;
     }
 
-    let mut buffer = String::new();
     for result in results {
-        let line = format!(
-            "{};{};{};{};{};{};{};{:.7};{};{:.7}\n",
+        let avg_len = if result.sequence_count > 0 {
+            (result.total_length as f64 / result.sequence_count as f64).round() as usize
+        } else {
+            0
+        };
+        let gc_pct = if result.total_length > 0 {
+            (result.gc_count as f64 / result.total_length as f64) * 100.0
+        } else {
+            0.0
+        };
+        let n_pct = if result.total_length > 0 {
+            (result.n_count as f64 / result.total_length as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        writeln!(
+            writer,
+            "{};{};{};{};{};{};{};{:.7};{};{:.7}",
             result.filename,
             result.total_length,
             result.sequence_count,
-            (result.total_length as f64 / result.sequence_count as f64).round() as usize,
+            avg_len,
             result.largest_contig,
             result.shortest_contig,
             result.n50,
-            (result.gc_count as f64 / result.total_length as f64) * 100.0,
+            gc_pct,
             result.n_count,
-            (result.n_count as f64 / result.total_length as f64) * 100.0,
-        );
-        buffer.push_str(&line);
-
-        // Write in chunks to avoid holding too much in memory
-        if buffer.len() > 128 * 1024 {
-            file.write_all(buffer.as_bytes())?;
-            buffer.clear();
-        }
+            n_pct,
+        )?;
     }
 
-    if !buffer.is_empty() {
-        file.write_all(buffer.as_bytes())?;
-    }
-
-    file.flush()?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -264,6 +280,9 @@ mod tests {
         let results = process_files(files_to_process, None);
 
         let csv_file = "test/attempt.csv";
+        if Path::new(csv_file).exists() {
+            let _ = fs::remove_file(csv_file);
+        }
 
         append_to_csv(&results, &csv_file).expect("Failed to write CSV");
         let mut thing: Vec<String> = fs::read_to_string("test/test.csv")

@@ -14,6 +14,8 @@ before:
     # good idea to do them here:
     - rustup default stable
     - cargo install --locked cargo-zigbuild
+    - sh -c 'command -v cross > /dev/null || cargo install cross'
+    - ./scripts/test_simd_cross.sh
     - cargo fetch --locked
 
 builds:

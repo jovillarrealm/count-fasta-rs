@@ -27,7 +27,6 @@ clap = { version = "4.5.20", features = ["derive"] }
 rayon = "1.8"
 flate2 = "1.0.34"
 zip = "4.2.0"
-bytecount = "0.6.8"
 liblzma = "0.4.0"
 bzip2 = "0.6"
 noodles = { version = "0.99.0", features = ["bgzf"] }
@@ -39,5 +38,4 @@ memmap2 = "0.9"
 memchr = "2.7.4"
 
 [features]
-default = ["runtime-dispatch-simd"]
-runtime-dispatch-simd = ["bytecount/runtime-dispatch-simd"]
+default = []

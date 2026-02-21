@@ -20,3 +20,18 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  test-simd:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Install cross
+      run: cargo install cross
+    - name: Test SIMD (QEMU)
+      run: QEMU_CPU=max cross test --target ${{ matrix.target }} --lib simd::tests

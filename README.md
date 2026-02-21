@@ -51,8 +51,27 @@ If the csv file was specified, then the created file will look like this
     "GCA_024699835_Aphelenchoides-besseyi_AORJ.fna";46759715;32;1461241.09;18100598;214;16068654;41.78;2900;0.01
 ```
 
-> [!IMPORTANT]
-> If you are setting a -d directory, you should probably set a -c csv file to go with it
+## Testing
+
+To run the standard tests:
+
+```bash
+cargo test
+```
+
+### SIMD Cross-Architecture Testing
+
+To verify the SIMD implementations (AVX2, AVX512, NEON) across different architectures using QEMU and `cross`:
+
+1.  **Install `cross`**: `cargo install cross`
+2.  **Ensure Docker/Podman** is running.
+3.  **Run the cross-test script**:
+
+```bash
+./scripts/test_simd_cross.sh
+```
+
+This script uses `QEMU_CPU=max` to ensure the emulated CPUs support the required SIMD features. It tests both `aarch64-unknown-linux-gnu` (NEON) and `x86_64-unknown-linux-gnu` (AVX2/AVX512).
 
 ## Implementation deets
 
