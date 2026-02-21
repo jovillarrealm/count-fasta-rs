@@ -60,6 +60,7 @@ pub fn update_stats(line: &[u8], no_simd: bool) -> (usize, usize, usize) {
 }
 
 #[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve2")]
 unsafe fn update_stats_sve2(line: &[u8]) -> (usize, usize, usize) {
     let mut gc_total: usize = 0;
     let mut n_total: usize = 0;
@@ -68,86 +69,96 @@ unsafe fn update_stats_sve2(line: &[u8]) -> (usize, usize, usize) {
     let mut ptr = line.as_ptr();
     let mut len = line.len();
 
-    // SVE2 implementation using inline assembly for stable Rust support.
-    // We use the MATCH instruction to find GC, N, and Skip characters.
+    // SVE implementation using inline assembly.
+    // We process the buffer in scalable chunks based on the vector width.
     while len > 0 {
         let n_gc: usize;
         let n_n: usize;
         let n_skipped: usize;
         let processed: usize;
 
-        // Characters to match
-        // z1: GC (G, g, C, c)
-        // z2: N (N, n)
-        // z3: Skip (space, \t, \n, \r, -, .)
-        core::arch::asm!(
-            "whilelt p0.b, xzr, {len}",
-            "ld1b {{z0.b}}, p0/z, [{ptr}]",
-            
-            // Match GC
-            "ptrue p1.b",
-            "mov z1.b, 'G'",
-            "mov z2.b, 'g'",
-            "mov z3.b, 'C'",
-            "mov z4.b, 'c'",
-            // Combine them into one vector for match (up to 16 bytes)
-            // Actually, we can just use a single vector with these 4 bytes
-            ".inst 0x05203821", // mov z1.b, #0x47 (G)
-            ".inst 0x05203822", // mov z2.b, #0x67 (g)
-            ".inst 0x05203823", // mov z3.b, #0x43 (C)
-            ".inst 0x05203824", // mov z4.b, #0x63 (c)
-            // This is getting complex for inline asm without a good SVE2 assembler.
-            // Let's use a simpler SVE approach that doesn't rely on SVE2 MATCH if possible,
-            // or use .inst for MATCH if we know the encoding.
-            // But MATCH is very good.
-            
-            // Alternative: use standard SVE comparisons if MATCH is tricky to encode manually.
-            // SVE (not SVE2) is enough for most of this and is better supported in some environments.
-            
-            // Let's use standard SVE instructions.
-            "cmpeq p1.b, p0/z, z0.b, 'G'",
-            "cmpeq p2.b, p0/z, z0.b, 'g'",
-            "cmpeq p3.b, p0/z, z0.b, 'C'",
-            "cmpeq p4.b, p0/z, z0.b, 'c'",
-            "orrs p1.b, p0/z, p1.b, p2.b",
-            "orrs p3.b, p0/z, p3.b, p4.b",
-            "orrs p1.b, p0/z, p1.b, p3.b",
-            "cntp {n_gc}, p0, p1.b",
-            
-            "cmpeq p2.b, p0/z, z0.b, 'N'",
-            "cmpeq p3.b, p0/z, z0.b, 'n'",
-            "orrs p2.b, p0/z, p2.b, p3.b",
-            "cntp {n_n}, p0, p2.b",
-            
-            "cmpeq p3.b, p0/z, z0.b, ' '",
-            "cmpeq p4.b, p0/z, z0.b, '\t'",
-            "cmpeq p5.b, p0/z, z0.b, '\n'",
-            "cmpeq p6.b, p0/z, z0.b, '\r'",
-            "cmpeq p7.b, p0/z, z0.b, '-'",
-            "orrs p3.b, p0/z, p3.b, p4.b",
-            "orrs p5.b, p0/z, p5.b, p6.b",
-            "orrs p3.b, p0/z, p3.b, p5.b",
-            "orrs p3.b, p0/z, p3.b, p7.b",
-            "cmpeq p4.b, p0/z, z0.b, '.'",
-            "orrs p3.b, p0/z, p3.b, p4.b",
-            "cntp {n_skipped}, p0, p3.b",
-            
-            "cntb {processed}",
-            len = in(reg) len,
-            ptr = in(reg) ptr,
-            n_gc = out(reg) n_gc,
-            n_n = out(reg) n_n,
-            n_skipped = out(reg) n_skipped,
-            processed = out(reg) processed,
-            clobber_abi("C"),
-        );
+        unsafe {
+            core::arch::asm!(
+                "whilelt p0.b, xzr, {len}",
+                "ld1b {{z0.b}}, p0/z, [{ptr}]",
+                
+                // Load constants for GC: G, g, C, c
+                "mov w8, #71", // G
+                "dup z1.b, w8",
+                "mov w8, #103", // g
+                "dup z2.b, w8",
+                "mov w8, #67", // C
+                "dup z3.b, w8",
+                "mov w8, #99", // c
+                "dup z4.b, w8",
+                
+                "cmpeq p1.b, p0/z, z0.b, z1.b",
+                "cmpeq p2.b, p0/z, z0.b, z2.b",
+                "cmpeq p3.b, p0/z, z0.b, z3.b",
+                "cmpeq p4.b, p0/z, z0.b, z4.b",
+                "orrs p1.b, p0/z, p1.b, p2.b",
+                "orrs p3.b, p0/z, p3.b, p4.b",
+                "orrs p1.b, p0/z, p1.b, p3.b",
+                "cntp {n_gc}, p0, p1.b",
+                
+                // Load constants for N: N, n
+                "mov w8, #78", // N
+                "dup z1.b, w8",
+                "mov w8, #110", // n
+                "dup z2.b, w8",
+                "cmpeq p2.b, p0/z, z0.b, z1.b",
+                "cmpeq p3.b, p0/z, z0.b, z2.b",
+                "orrs p2.b, p0/z, p2.b, p3.b",
+                "cntp {n_n}, p0, p2.b",
+                
+                // Load constants for Skipped: ' ', \t, \n, \r, -, .
+                "mov w8, #32", // space
+                "dup z1.b, w8",
+                "mov w8, #9", // \t
+                "dup z2.b, w8",
+                "mov w8, #10", // \n
+                "dup z3.b, w8",
+                "mov w8, #13", // \r
+                "dup z4.b, w8",
+                "mov w8, #45", // -
+                "dup z5.b, w8",
+                "mov w8, #46", // .
+                "dup z6.b, w8",
+
+                "cmpeq p3.b, p0/z, z0.b, z1.b",
+                "cmpeq p4.b, p0/z, z0.b, z2.b",
+                "cmpeq p5.b, p0/z, z0.b, z3.b",
+                "cmpeq p6.b, p0/z, z0.b, z4.b",
+                "cmpeq p7.b, p0/z, z0.b, z5.b",
+                "orrs p3.b, p0/z, p3.b, p4.b",
+                "orrs p5.b, p0/z, p5.b, p6.b",
+                "orrs p3.b, p0/z, p3.b, p5.b",
+                "orrs p3.b, p0/z, p3.b, p7.b",
+                "cmpeq p4.b, p0/z, z0.b, z6.b",
+                "orrs p3.b, p0/z, p3.b, p4.b",
+                "cntp {n_skipped}, p0, p3.b",
+                
+                "cntb {processed}",
+                len = in(reg) len,
+                ptr = in(reg) ptr,
+                n_gc = out(reg) n_gc,
+                n_n = out(reg) n_n,
+                n_skipped = out(reg) n_skipped,
+                processed = out(reg) processed,
+                out("z0") _, out("z1") _, out("z2") _, out("z3") _, out("z4") _, out("z5") _, out("z6") _,
+                out("p0") _, out("p1") _, out("p2") _, out("p3") _, out("p4") _, out("p5") _, out("p6") _, out("p7") _,
+                out("x8") _,
+            );
+        }
 
         gc_total += n_gc;
         n_total += n_n;
         skipped_total += n_skipped;
         
         let actual_processed = std::cmp::min(len, processed);
-        ptr = ptr.add(actual_processed);
+        unsafe {
+            ptr = ptr.add(actual_processed);
+        }
         len -= actual_processed;
     }
 
