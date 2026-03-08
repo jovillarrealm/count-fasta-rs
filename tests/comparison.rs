@@ -82,6 +82,7 @@ fn test_compare_perl_script() {
         "test/garbage_start.fa",
         "test/multi_line_seq.fa",
         "test/mixed_case.fa",
+        "test/humantest.fna",
     ];
 
     if !Path::new(perl_script).exists() {
@@ -135,6 +136,11 @@ fn test_compare_perl_script() {
             let perl_val = perl_metrics.get(key);
             let rust_val = rust_metrics.get(key);
             
+            // Allow Perl to report "bp" for Shortest contig when it fails (common for single-sequence files)
+            if key == "Shortest contig" && perl_val.map_or(false, |v| v == "bp") {
+                continue;
+            }
+
             assert!(perl_val.is_some(), "Missing key in Perl output for {}: {}", test_file, key);
             assert!(rust_val.is_some(), "Missing key in Rust output for {}: {}", test_file, key);
 

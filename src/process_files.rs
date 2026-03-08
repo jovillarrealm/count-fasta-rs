@@ -19,6 +19,8 @@ use std::os::unix::io::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
+const DECODER_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+
 pub const VALID_FILES: [&str; 3] = ["fa", "fasta", "fna"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,17 +52,16 @@ impl FileFormat {
 
 pub fn process_any_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     match FileFormat::from_path(file) {
-        FileFormat::Gzip => process_gz_file(file, buffer_size, no_simd),
-        FileFormat::Zip => process_zip_file(file, buffer_size, no_simd),
-        FileFormat::Xz => process_xz_file(file, buffer_size, no_simd),
-        FileFormat::Bzip2 => process_bz2_file(file, buffer_size, no_simd),
-        FileFormat::Bgzip => process_bgzip_file(file, buffer_size, no_simd),
+        FileFormat::Gzip => process_gz_file(file, no_simd),
+        FileFormat::Zip => process_zip_file(file, no_simd),
+        FileFormat::Xz => process_xz_file(file, no_simd),
+        FileFormat::Bzip2 => process_bz2_file(file, no_simd),
+        FileFormat::Bgzip => process_bgzip_file(file, no_simd),
         FileFormat::Naf => process_naf_file(file, no_simd),
-        FileFormat::Fasta => process_fasta_file(file, buffer_size, no_simd),
+        FileFormat::Fasta => process_fasta_file(file, no_simd),
         FileFormat::Unknown => Ok(Vec::new()),
     }
 }
@@ -253,31 +254,27 @@ pub fn open_file<P: AsRef<Path>>(path: P) -> std::io::Result<File> {
 
 pub fn process_xz_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, XzDecoder::new, no_simd)
+    process_decoded_stream(file, XzDecoder::new, no_simd)
 }
 
 pub fn process_bz2_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, BzDecoder::new, no_simd)
+    process_decoded_stream(file, BzDecoder::new, no_simd)
 }
 
 pub fn process_bgzip_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, bgzf::io::Reader::new, no_simd)
+    process_decoded_stream(file, bgzf::io::Reader::new, no_simd)
 }
 
 pub fn process_fasta_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::for_path(file);
@@ -298,7 +295,7 @@ pub fn process_fasta_file(
         }
         Err(_) => {
             println!("Failed to mmap file: {:?}", file);
-            let reader = BufReader::with_capacity(buffer_size, file);
+            let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file);
             process_reader(reader, &mut results, no_simd)?;
         }
     }
@@ -338,15 +335,13 @@ pub fn process_naf_file(file: &Path, no_simd: bool) -> std::io::Result<Vec<Analy
 
 pub fn process_gz_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, buffer_size, GzDecoder::new, no_simd)
+    process_decoded_stream(file, GzDecoder::new, no_simd)
 }
 
 fn process_decoded_stream<D, F>(
     file: &Path,
-    buffer_size: usize,
     decoder_factory: F,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>>
@@ -357,18 +352,17 @@ where
     let mut results = AnalysisResults::for_path(file);
     let file = open_file(file)?;
     let decoder = decoder_factory(file);
-    let reader = BufReader::with_capacity(buffer_size, decoder);
+    let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, decoder);
     process_reader(reader, &mut results, no_simd)?;
     Ok(vec![results])
 }
 
 pub fn process_zip_file(
     file: &Path,
-    buffer_size: usize,
     no_simd: bool,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     let file = open_file(file)?;
-    let buf_reader = BufReader::with_capacity(buffer_size, file);
+    let buf_reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file);
     let mut archive = ZipArchive::new(buf_reader)?;
     let mut all_results = Vec::new();
 
@@ -384,7 +378,7 @@ pub fn process_zip_file(
                         .to_string_lossy()
                         .to_string(),
                 );
-                let reader = BufReader::with_capacity(buffer_size, zip_file);
+                let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, zip_file);
                 if let Err(e) = process_reader(reader, &mut result, no_simd) {
                     eprintln!("Error processing {file_name}: {e}");
                     continue; // Skip this file but continue processing others
@@ -614,7 +608,7 @@ mod tests {
     #[test]
     fn test_process_missing_file() {
         let path = Path::new("non_existent_file.fa");
-        let res = process_fasta_file(path, 1024, false);
+        let res = process_fasta_file(path, false);
         assert!(res.is_err());
     }
 
@@ -637,7 +631,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("corrupted.gz");
         fs::write(&temp_file, b"this is not a valid gzip file").unwrap();
-        let res = process_gz_file(&temp_file, 1024, false);
+        let res = process_gz_file(&temp_file, false);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
@@ -647,7 +641,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("corrupted.xz");
         fs::write(&temp_file, b"this is not a valid xz file").unwrap();
-        let res = process_xz_file(&temp_file, 1024, false);
+        let res = process_xz_file(&temp_file, false);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
@@ -657,7 +651,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("corrupted.zip");
         fs::write(&temp_file, b"this is not a valid zip file").unwrap();
-        let res = process_zip_file(&temp_file, 1024, false);
+        let res = process_zip_file(&temp_file, false);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
@@ -667,7 +661,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("empty_mmap.fa");
         fs::write(&temp_file, b"").unwrap();
-        let res = process_fasta_file(&temp_file, 1024, false);
+        let res = process_fasta_file(&temp_file, false);
         assert!(res.is_ok());
         let results = res.unwrap();
         assert_eq!(results[0].sequence_count, 0);

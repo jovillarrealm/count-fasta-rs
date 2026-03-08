@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 // Licensed under the Apache License, Version 2.0
 // <LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0>
 // at your option. This file may not be copied, modified,
@@ -5,7 +6,7 @@
 
 //! # count-fasta-rs
 //!
-//! A high-performance stream processor for FASTA files (including compressed formats) 
+//! A high-performance stream processor for FASTA files (including compressed formats)
 //! designed with the following architecture:
 //! - **Low memory usage**: Processes files in chunks to minimize footprint.
 //! - **Zero-copy reads**: Leverages memory mapping and buffered I/O to avoid unnecessary data duplication.
@@ -13,26 +14,14 @@
 //! - **Efficient I/O**: Optimizes OS-level read-ahead and sequential access patterns.
 //! - **SIMD optimizations**: Employs AVX2 instructions for rapid sequence analysis and statistics calculation.
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use rayon::prelude::*;
-use std::cmp::{max, min};
-use std::env;
+use std::cmp::min;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 mod process_files;
 mod simd;
-
-extern crate num_cpus;
-
-fn determine_buffer_size() -> usize {
-    const DEFAULT_SIZE: usize = 2 * 1024 * 1024; // Default to 1MB
-    const MAX_SIZE: usize = 5 * 1024 * 1024; // Cap at 10MB
-    match env::var("BUFFER_SIZE") {
-        Ok(val) => val.parse().unwrap_or(DEFAULT_SIZE).min(MAX_SIZE),
-        Err(_) => DEFAULT_SIZE,
-    }
-}
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -119,9 +108,15 @@ struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
-    let mut files_to_process = Vec::new();
+    let cmd = Args::command().after_help(format!(
+        "SIMD Support: Enabled (std::simd)\nDefault max threads: {}",
+        determine_threads(None, None)
+    ));
 
+    let matches = cmd.get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    let mut files_to_process = Vec::new();
     for dir in args.directory {
         match get_fasta_files_from_directory(&dir) {
             Ok(files) => files_to_process.extend(files),
@@ -152,7 +147,9 @@ fn get_fasta_files_from_directory(dir: &str) -> std::io::Result<Vec<PathBuf>> {
 
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.is_file() && process_files::FileFormat::from_path(&path) != process_files::FileFormat::Unknown {
+        if path.is_file()
+            && process_files::FileFormat::from_path(&path) != process_files::FileFormat::Unknown
+        {
             files.push(path);
         }
     }
@@ -164,8 +161,7 @@ fn process_files(
     threads: Option<usize>,
     no_simd: bool,
 ) -> Vec<process_files::AnalysisResults> {
-    let buffer_size = determine_buffer_size();
-    let available_threads = determine_threads(&files, threads);
+    let available_threads = determine_threads(Some(&files), threads);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .build()
@@ -173,28 +169,29 @@ fn process_files(
     pool.install(|| {
         files
             .par_iter()
-            .flat_map(|file| {
-                match process_files::process_any_file(file, buffer_size, no_simd) {
+            .flat_map(
+                |file| match process_files::process_any_file(file, no_simd) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("Error processing file {:?}: {}", file, e);
                         Vec::new()
                     }
-                }
-            })
+                },
+            )
             .collect()
     })
 }
 
-fn determine_threads(files: &[PathBuf], threads: Option<usize>) -> usize {
+fn determine_threads(files: Option<&[PathBuf]>, threads: Option<usize>) -> usize {
     let available_threads;
     if let Some(threads) = threads {
         available_threads = threads;
     } else {
         let usable_threads_logical = (num_cpus::get() as f32 * 0.9).round() as usize;
         let usable_physical_threads = (num_cpus::get_physical() as f32 * 0.75).round() as usize;
-        let usable_threads = max(usable_threads_logical, usable_physical_threads);
-        available_threads = min(usable_threads, files.len());
+        let usable_threads = min(usable_threads_logical, usable_physical_threads);
+
+        available_threads = min(usable_threads, files.map_or(usize::MAX, |f| f.len()));
     }
     available_threads
 }
@@ -207,15 +204,11 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
     }
     println!("Total length of sequence:\t{} bp", results.total_length);
     println!("Total number of sequences:\t{}", results.sequence_count);
-    let avg_len = if results.sequence_count > 0 {
-        results.total_length / results.sequence_count
-    } else {
-        0
-    };
-    println!(
-        "Average contig length is:\t{} bp",
-        avg_len
-    );
+    let avg_len = results
+        .total_length
+        .checked_div(results.sequence_count)
+        .unwrap_or(0);
+    println!("Average contig length is:\t{} bp", avg_len);
     println!("Largest contig:\t\t{} bp", results.largest_contig);
     println!("Shortest contig:\t\t{} bp", results.shortest_contig);
     println!(
