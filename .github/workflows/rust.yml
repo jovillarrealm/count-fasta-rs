@@ -34,4 +34,4 @@ jobs:
     - name: Install cross
       run: cargo install cross
     - name: Test SIMD (QEMU)
-      run: QEMU_CPU=max cross test --target ${{ matrix.target }} --lib simd::tests
+      run: QEMU_CPU=max cross test --target ${{ matrix.target }} --bin count-fasta-rs simd::tests
