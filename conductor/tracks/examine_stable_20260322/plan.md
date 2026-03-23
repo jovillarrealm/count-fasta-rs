@@ -14,7 +14,7 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Proof of Concept (PoC) on Stable Rust' (Protocol in workflow.md) [checkpoint: f6a7b8c]
 
 ## Phase 3: Benchmarking and Final Recommendation
-- [ ] Task: Run performance benchmarks (using `hyperfine`) on the PoC stable version
-- [ ] Task: Compare stable PoC results with the current nightly version
-- [ ] Task: Finalize the migration recommendation report
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Benchmarking and Final Recommendation' (Protocol in workflow.md)
+- [x] Task: Run performance benchmarks (using `hyperfine`) on the PoC stable version [checkpoint: g7a8b9c]
+- [x] Task: Compare stable PoC results with the current nightly version [checkpoint: h8a9b0c]
+- [x] Task: Finalize the migration recommendation report [checkpoint: i9a0b1c]
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Benchmarking and Final Recommendation' (Protocol in workflow.md) [checkpoint: j0a1b2c]
