@@ -1,7 +1,7 @@
 # Tech Stack: count-fasta-rs
 
 ## Core Language
-- **Rust (Nightly, Edition 2024):** Required for `#![feature(portable_simd)]` and modern language features.
+- **Rust (Stable, Edition 2024):** The project now uses the stable Rust toolchain.
 
 ## Key Libraries & Frameworks
 - **CLI Handling:** `clap` (v4 with derive feature) for robust command-line argument parsing.
@@ -16,8 +16,9 @@
 - **Performance Optimizations:**
     - `memmap2` (Zero-copy memory mapping for FASTA files)
     - `memchr` (Highly optimized byte search)
+    - `bytemuck` (Safe bit-casting for SIMD operations)
     - `num_cpus` (Automatic thread pool scaling)
-- **SIMD Support:** `std::simd` (via nightly portable-simd feature) for hardware-accelerated nucleotide counting.
+- **SIMD Support:** `wide` crate for hardware-accelerated nucleotide counting on stable Rust.
 
 ## Build & CI/CD
 - **Testing:** `cargo test` for unit and integration tests.
