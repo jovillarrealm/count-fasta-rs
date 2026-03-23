@@ -1,4 +1,4 @@
-use std::simd::prelude::*;
+use wide::*;
 
 const LOOKUP: [u8; 256] = {
     let mut table = [0u8; 256];
@@ -53,13 +53,7 @@ fn update_stats_simd(line: &[u8]) -> (usize, usize, usize) {
     let mut n_total = 0;
     let mut seq_chars_total = 0;
 
-    let (head, mid, tail) = line.as_simd::<32>();
-
-    // Process head
-    let (gc, n, sc) = update_stats_scalar(head);
-    gc_total += gc;
-    n_total += n;
-    seq_chars_total += sc;
+    let mut chunks = line.chunks_exact(32);
 
     let v_case_mask = u8x32::splat(0x20);
     let v_g = u8x32::splat(b'g');
@@ -73,32 +67,37 @@ fn update_stats_simd(line: &[u8]) -> (usize, usize, usize) {
     let v_dash = u8x32::splat(b'-');
     let v_dot = u8x32::splat(b'.');
 
-    for &chunk in mid {
-        let v = chunk | v_case_mask;
+    for chunk in chunks.by_ref() {
+        let chunk_arr: [u8; 32] = chunk.try_into().unwrap();
+        let v_chunk = u8x32::from(chunk_arr);
+        let v = v_chunk | v_case_mask;
         
         let is_g = v.simd_eq(v_g);
         let is_c = v.simd_eq(v_c);
         let is_n = v.simd_eq(v_n);
         
         let is_gc = is_g | is_c;
-        gc_total += is_gc.to_bitmask().count_ones() as usize;
-        n_total += is_n.to_bitmask().count_ones() as usize;
+        let signed_gc: i8x32 = bytemuck::cast(is_gc);
+        let signed_n: i8x32 = bytemuck::cast(is_n);
+        gc_total += signed_gc.to_bitmask().count_ones() as usize;
+        n_total += signed_n.to_bitmask().count_ones() as usize;
 
         // Count skipped
-        let s1 = chunk.simd_eq(v_space);
-        let s2 = chunk.simd_eq(v_tab);
-        let s3 = chunk.simd_eq(v_nl);
-        let s4 = chunk.simd_eq(v_cr);
-        let s5 = chunk.simd_eq(v_dash);
-        let s6 = chunk.simd_eq(v_dot);
+        let s1 = v_chunk.simd_eq(v_space);
+        let s2 = v_chunk.simd_eq(v_tab);
+        let s3 = v_chunk.simd_eq(v_nl);
+        let s4 = v_chunk.simd_eq(v_cr);
+        let s5 = v_chunk.simd_eq(v_dash);
+        let s6 = v_chunk.simd_eq(v_dot);
         
         let is_skipped = s1 | s2 | s3 | s4 | s5 | s6;
-        let skipped_count = is_skipped.to_bitmask().count_ones() as usize;
+        let signed_skipped: i8x32 = bytemuck::cast(is_skipped);
+        let skipped_count = signed_skipped.to_bitmask().count_ones() as usize;
         seq_chars_total += 32 - skipped_count;
     }
 
     // Process tail
-    let (gc, n, sc) = update_stats_scalar(tail);
+    let (gc, n, sc) = update_stats_scalar(chunks.remainder());
     gc_total += gc;
     n_total += n;
     seq_chars_total += sc;
