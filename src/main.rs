@@ -99,6 +99,12 @@ struct Args {
     #[clap(name = "FASTA FILE", value_hint = clap::ValueHint::FilePath)]
     files: Vec<String>,
 
+    /// Minimum contig length threshold in bp.
+    ///
+    /// Contigs shorter than this length are excluded from assembly metrics.
+    #[clap(short = 'm', long = "min-length", default_value = "0")]
+    min_length: usize,
+
     /// Disable SIMD optimizations (force scalar fallback).
     ///
     /// Useful for debugging or if SIMD causes issues on specific hardware.
@@ -127,7 +133,7 @@ fn main() {
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
-    let results = process_files(files_to_process, args.threads, args.no_simd);
+    let results = process_files(files_to_process, args.threads, args.no_simd, args.min_length);
 
     if let Some(csv_file) = args.csv {
         if let Err(e) = append_to_csv(&results, &csv_file) {
@@ -159,6 +165,7 @@ fn process_files(
     files: Vec<PathBuf>,
     threads: Option<usize>,
     no_simd: bool,
+    min_length: usize,
 ) -> Vec<process_files::AnalysisResults> {
     let available_threads = determine_threads(Some(&files), threads);
     let pool = rayon::ThreadPoolBuilder::new()
@@ -169,7 +176,7 @@ fn process_files(
         files
             .par_iter()
             .flat_map(
-                |file| match process_files::process_any_file(file, no_simd) {
+                |file| match process_files::process_any_file(file, no_simd, min_length) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("Error processing file {:?}: {}", file, e);
@@ -302,7 +309,7 @@ mod tests {
             files_to_process.extend(files);
         }
 
-        let results = process_files(files_to_process, None, false);
+        let results = process_files(files_to_process, None, false, 0);
 
         let csv_file = "test/attempt.csv";
         if Path::new(csv_file).exists() {

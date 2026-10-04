@@ -53,15 +53,16 @@ impl FileFormat {
 pub fn process_any_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     match FileFormat::from_path(file) {
-        FileFormat::Gzip => process_gz_file(file, no_simd),
-        FileFormat::Zip => process_zip_file(file, no_simd),
-        FileFormat::Xz => process_xz_file(file, no_simd),
-        FileFormat::Bzip2 => process_bz2_file(file, no_simd),
-        FileFormat::Bgzip => process_bgzip_file(file, no_simd),
-        FileFormat::Naf => process_naf_file(file, no_simd),
-        FileFormat::Fasta => process_fasta_file(file, no_simd),
+        FileFormat::Gzip => process_gz_file(file, no_simd, min_length),
+        FileFormat::Zip => process_zip_file(file, no_simd, min_length),
+        FileFormat::Xz => process_xz_file(file, no_simd, min_length),
+        FileFormat::Bzip2 => process_bz2_file(file, no_simd, min_length),
+        FileFormat::Bgzip => process_bgzip_file(file, no_simd, min_length),
+        FileFormat::Naf => process_naf_file(file, no_simd, min_length),
+        FileFormat::Fasta => process_fasta_file(file, no_simd, min_length),
         FileFormat::Unknown => Ok(Vec::new()),
     }
 }
@@ -69,20 +70,39 @@ pub fn process_any_file(
 struct FastaParser {
     lengths: Vec<usize>,
     current_sequence_length: usize,
+    current_gc_count: usize,
+    current_n_count: usize,
+    min_length: usize,
     in_header: bool,
     last_char_was_newline: bool,
     started: bool,
 }
 
 impl FastaParser {
-    fn new() -> Self {
+    fn new(min_length: usize) -> Self {
         Self {
             lengths: Vec::with_capacity(250),
             current_sequence_length: 0,
+            current_gc_count: 0,
+            current_n_count: 0,
+            min_length,
             in_header: false,
             last_char_was_newline: true, // To catch the very first '>'
             started: false,
         }
+    }
+
+    fn commit_current_contig(&mut self, results: &mut AnalysisResults) {
+        if self.current_sequence_length >= self.min_length {
+            if self.current_sequence_length > 0 {
+                self.lengths.push(self.current_sequence_length);
+            }
+            results.gc_count += self.current_gc_count;
+            results.n_count += self.current_n_count;
+        }
+        self.current_sequence_length = 0;
+        self.current_gc_count = 0;
+        self.current_n_count = 0;
     }
 
     fn feed(&mut self, data: &[u8], results: &mut AnalysisResults, no_simd: bool) {
@@ -108,10 +128,11 @@ impl FastaParser {
                 if self.last_char_was_newline && data[consumed] == b'>' {
                     // Start of a new header
                     if self.started {
-                        self.lengths.push(self.current_sequence_length);
-                        self.current_sequence_length = 0;
+                        self.commit_current_contig(results);
                     }
-                    results.sequence_count += 1;
+                    if self.min_length == 0 {
+                        results.sequence_count += 1;
+                    }
                     self.started = true;
                     self.in_header = true;
                     consumed += 1;
@@ -140,7 +161,10 @@ impl FastaParser {
                     };
 
                     if self.started {
-                        self.current_sequence_length += update_stats(chunk, results, no_simd);
+                        let (gc, n, sc) = crate::simd::update_stats(chunk, no_simd);
+                        self.current_sequence_length += sc;
+                        self.current_gc_count += gc;
+                        self.current_n_count += n;
                     }
                     consumed = chunk_end;
                     self.last_char_was_newline = new_last_newline;
@@ -150,8 +174,11 @@ impl FastaParser {
     }
 
     fn finish(mut self, results: &mut AnalysisResults) {
-        if self.current_sequence_length > 0 {
-            self.lengths.push(self.current_sequence_length);
+        if self.started {
+            self.commit_current_contig(results);
+        }
+        if self.min_length > 0 {
+            results.sequence_count = self.lengths.len();
         }
         results.calculate_stats(self.lengths);
     }
@@ -274,27 +301,31 @@ pub fn open_file<P: AsRef<Path>>(path: P) -> std::io::Result<File> {
 pub fn process_xz_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, XzDecoder::new, no_simd)
+    process_decoded_stream(file, XzDecoder::new, no_simd, min_length)
 }
 
 pub fn process_bz2_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, BzDecoder::new, no_simd)
+    process_decoded_stream(file, BzDecoder::new, no_simd, min_length)
 }
 
 pub fn process_bgzip_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, bgzf::io::Reader::new, no_simd)
+    process_decoded_stream(file, bgzf::io::Reader::new, no_simd, min_length)
 }
 
 pub fn process_fasta_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::for_path(file);
     let file = open_file(file)?;
@@ -310,19 +341,23 @@ pub fn process_fasta_file(
             #[cfg(target_os = "linux")]
             mmap.advise(memmap2::Advice::HugePage)?;
 
-            process_buffer(&mmap, &mut results, no_simd)?;
+            process_buffer(&mmap, &mut results, no_simd, min_length)?;
         }
         Err(_) => {
             println!("Failed to mmap file: {:?}", file);
             let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file);
-            process_reader(reader, &mut results, no_simd)?;
+            process_reader(reader, &mut results, no_simd, min_length)?;
         }
     }
 
     Ok(vec![results])
 }
 
-pub fn process_naf_file(file: &Path, no_simd: bool) -> std::io::Result<Vec<AnalysisResults>> {
+pub fn process_naf_file(
+    file: &Path,
+    no_simd: bool,
+    min_length: usize,
+) -> std::io::Result<Vec<AnalysisResults>> {
     let mut results = AnalysisResults::for_path(file);
     let decoder = nafcodec::Decoder::from_path(file)
         .map_err(|e| std::io::Error::other(format!("failed to open nucleotide archive: {e}")))?;
@@ -337,16 +372,20 @@ pub fn process_naf_file(file: &Path, no_simd: bool) -> std::io::Result<Vec<Analy
                 .ok_or_else(|| std::io::Error::other(format!("naf file had empty seq on {file:?}?")))?,
         )
         .map_err(|e| std::io::Error::other(format!("failed to turn u64 to usize on {file:?}: {e}")))?;
-        results.total_length += seq_length;
-        results.largest_contig = results.largest_contig.max(seq_length);
-        results.shortest_contig = results.shortest_contig.min(seq_length);
+        if min_length > 0 && seq_length < min_length {
+            continue;
+        }
         lengths.push(seq_length);
         let line = seq
             .sequence
             .ok_or_else(|| std::io::Error::other(format!("naf sequence had bad data {file:?}")))?;
-        update_stats(line.as_bytes(), &mut results, no_simd);
+        let (gc, n, _) = crate::simd::update_stats(line.as_bytes(), no_simd);
+        results.gc_count += gc;
+        results.n_count += n;
     }
-    results.sequence_count = lengths.len();
+    if min_length > 0 {
+        results.sequence_count = lengths.len();
+    }
     results.calculate_stats(lengths);
 
     Ok(vec![results])
@@ -355,14 +394,16 @@ pub fn process_naf_file(file: &Path, no_simd: bool) -> std::io::Result<Vec<Analy
 pub fn process_gz_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    process_decoded_stream(file, GzDecoder::new, no_simd)
+    process_decoded_stream(file, GzDecoder::new, no_simd, min_length)
 }
 
 fn process_decoded_stream<D, F>(
     file: &Path,
     decoder_factory: F,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>>
 where
     D: Read,
@@ -372,13 +413,14 @@ where
     let file = open_file(file)?;
     let decoder = decoder_factory(file);
     let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, decoder);
-    process_reader(reader, &mut results, no_simd)?;
+    process_reader(reader, &mut results, no_simd, min_length)?;
     Ok(vec![results])
 }
 
 pub fn process_zip_file(
     file: &Path,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
     let file = open_file(file)?;
     let buf_reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file);
@@ -398,7 +440,7 @@ pub fn process_zip_file(
                         .to_string(),
                 );
                 let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, zip_file);
-                if let Err(e) = process_reader(reader, &mut result, no_simd) {
+                if let Err(e) = process_reader(reader, &mut result, no_simd, min_length) {
                     eprintln!("Error processing {file_name}: {e}");
                     continue; // Skip this file but continue processing others
                 };
@@ -410,12 +452,13 @@ pub fn process_zip_file(
     Ok(all_results)
 }
 
-fn process_reader<R: Read>(
+pub fn process_reader<R: Read>(
     mut reader: BufReader<R>,
     results: &mut AnalysisResults,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<()> {
-    let mut parser = FastaParser::new();
+    let mut parser = FastaParser::new(min_length);
 
     loop {
         let buf = reader.fill_buf()?;
@@ -431,6 +474,7 @@ fn process_reader<R: Read>(
     Ok(())
 }
 
+#[cfg(test)]
 fn update_stats(line: &[u8], results: &mut AnalysisResults, no_simd: bool) -> usize {
     let (gc, n, seq_chars) = crate::simd::update_stats(line, no_simd);
     results.gc_count += gc;
@@ -438,12 +482,13 @@ fn update_stats(line: &[u8], results: &mut AnalysisResults, no_simd: bool) -> us
     seq_chars
 }
 
-fn process_buffer(
+pub fn process_buffer(
     data: &[u8],
     results: &mut AnalysisResults,
     no_simd: bool,
+    min_length: usize,
 ) -> std::io::Result<()> {
-    let mut parser = FastaParser::new();
+    let mut parser = FastaParser::new(min_length);
     parser.feed(data, results, no_simd);
     parser.finish(results);
     Ok(())
@@ -509,7 +554,7 @@ mod tests {
     fn test_process_buffer() {
         let data = b">seq1\nATGC\n>seq2\nAAAAA\n";
         let mut results = AnalysisResults::new("buffer".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
 
         assert_eq!(results.total_length, 9);
         assert_eq!(results.sequence_count, 2);
@@ -543,7 +588,7 @@ mod tests {
         let data = b">seq1\nATGC\r\n>seq2\r\nAAAAA\n";
         let mut results = AnalysisResults::new("mixed".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results, false).unwrap();
+        process_reader(reader, &mut results, false, 0).unwrap();
 
         assert_eq!(results.total_length, 9);
         assert_eq!(results.sequence_count, 2);
@@ -553,7 +598,7 @@ mod tests {
     fn test_process_buffer_headers_with_gc() {
         let data = b">seq_with_GC_and_N\nATGC\n>next\nNNNN\n";
         let mut results = AnalysisResults::new("headers".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
 
         // Header content should NOT be counted
         assert_eq!(results.gc_count, 2); 
@@ -565,7 +610,7 @@ mod tests {
     fn test_process_with_gaps_and_whitespace() {
         let data = b">seq1\nAT GC\n-..-\nATGC\n";
         let mut results = AnalysisResults::new("gaps".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
 
         // ATGC (4) + ATGC (4) = 8. Gaps and spaces ignored.
         assert_eq!(results.total_length, 8);
@@ -576,23 +621,51 @@ mod tests {
     fn test_process_buffer_crlf() {
         let data = b">seq1\r\nATGC\r\n>seq2\r\nAAAAA\r\n";
         let mut results = AnalysisResults::new("buffer".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
 
         assert_eq!(results.total_length, 9);
         assert_eq!(results.sequence_count, 2);
     }
 
     #[test]
+    fn test_process_buffer_min_length() {
+        let data = b">seq1\nAAAA\n>seq2\nAAAAAAAA\n>seq3\nAA\n"; // seq1: 4bp, seq2: 8bp, seq3: 2bp
+        let mut results = AnalysisResults::new("min_len.fa".to_string());
+        process_buffer(data, &mut results, false, 4).unwrap();
+
+        assert_eq!(results.sequence_count, 2);
+        assert_eq!(results.total_length, 12);
+        assert_eq!(results.largest_contig, 8);
+        assert_eq!(results.shortest_contig, 4);
+        assert_eq!(results.n50, 8);
+        assert_eq!(results.l50, 1);
+    }
+
+    #[test]
+    fn test_process_buffer_min_length_all_excluded() {
+        let data = b">seq1\nAAAA\n>seq2\nAA\n"; // 4bp, 2bp
+        let mut results = AnalysisResults::new("min_len_all.fa".to_string());
+        process_buffer(data, &mut results, false, 10).unwrap();
+
+        assert_eq!(results.sequence_count, 0);
+        assert_eq!(results.total_length, 0);
+        assert_eq!(results.largest_contig, 0);
+        assert_eq!(results.shortest_contig, usize::MAX);
+        assert_eq!(results.n50, 0);
+        assert_eq!(results.l50, 0);
+    }
+
+    #[test]
     fn test_process_empty() {
         let data = b"";
         let mut results = AnalysisResults::new("empty".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
         assert_eq!(results.total_length, 0);
         assert_eq!(results.sequence_count, 0);
 
         let mut results2 = AnalysisResults::new("empty_reader".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results2, false).unwrap();
+        process_reader(reader, &mut results2, false, 0).unwrap();
         assert_eq!(results2.total_length, 0);
         assert_eq!(results2.sequence_count, 0);
     }
@@ -601,13 +674,13 @@ mod tests {
     fn test_process_only_header() {
         let data = b">only_header\n";
         let mut results = AnalysisResults::new("only_header".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
         assert_eq!(results.total_length, 0);
         assert_eq!(results.sequence_count, 1);
 
         let mut results2 = AnalysisResults::new("only_header_reader".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results2, false).unwrap();
+        process_reader(reader, &mut results2, false, 0).unwrap();
         assert_eq!(results2.total_length, 0);
         assert_eq!(results2.sequence_count, 1);
     }
@@ -616,13 +689,13 @@ mod tests {
     fn test_process_no_trailing_newline() {
         let data = b">seq1\nATGC";
         let mut results = AnalysisResults::new("no_newline".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
         assert_eq!(results.total_length, 4);
         assert_eq!(results.sequence_count, 1);
 
         let mut results2 = AnalysisResults::new("no_newline_reader".to_string());
         let reader = BufReader::new(&data[..]);
-        process_reader(reader, &mut results2, false).unwrap();
+        process_reader(reader, &mut results2, false, 0).unwrap();
         assert_eq!(results2.total_length, 4);
         assert_eq!(results2.sequence_count, 1);
     }
@@ -631,7 +704,7 @@ mod tests {
     fn test_process_lines_before_header() {
         let data = b"some noise\n>seq1\nATGC\n";
         let mut results = AnalysisResults::new("noise".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
         // Noise is now correctly ignored.
         assert_eq!(results.sequence_count, 1);
         assert_eq!(results.total_length, 4);
@@ -641,7 +714,7 @@ mod tests {
     fn test_real_world_complexities() {
         let data = b"; legacy comment line\n>seq1 with spaces\nATGC\n>seq1\nAAAA\n>  seq2\tmetadata\nGGGG\n";
         let mut results = AnalysisResults::new("complex".to_string());
-        process_buffer(data, &mut results, false).unwrap();
+        process_buffer(data, &mut results, false, 0).unwrap();
 
         // 1. Comment line is ignored. 3 sequences found.
         // 2. Total length: 4 (ATGC) + 4 (AAAA) + 4 (GGGG) = 12
@@ -652,7 +725,7 @@ mod tests {
     #[test]
     fn test_process_missing_file() {
         let path = Path::new("non_existent_file.fa");
-        let res = process_fasta_file(path, false);
+        let res = process_fasta_file(path, false, 0);
         assert!(res.is_err());
     }
 
@@ -666,7 +739,7 @@ mod tests {
         }
         let reader = BufReader::new(FailingReader);
         let mut results = AnalysisResults::new("failing".to_string());
-        let res = process_reader(reader, &mut results, false);
+        let res = process_reader(reader, &mut results, false, 0);
         assert!(res.is_err());
     }
 
@@ -675,7 +748,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("corrupted.gz");
         fs::write(&temp_file, b"this is not a valid gzip file").unwrap();
-        let res = process_gz_file(&temp_file, false);
+        let res = process_gz_file(&temp_file, false, 0);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
@@ -685,7 +758,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("corrupted.xz");
         fs::write(&temp_file, b"this is not a valid xz file").unwrap();
-        let res = process_xz_file(&temp_file, false);
+        let res = process_xz_file(&temp_file, false, 0);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
@@ -695,7 +768,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("corrupted.zip");
         fs::write(&temp_file, b"this is not a valid zip file").unwrap();
-        let res = process_zip_file(&temp_file, false);
+        let res = process_zip_file(&temp_file, false, 0);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
@@ -705,7 +778,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("empty_mmap.fa");
         fs::write(&temp_file, b"").unwrap();
-        let res = process_fasta_file(&temp_file, false);
+        let res = process_fasta_file(&temp_file, false, 0);
         assert!(res.is_ok());
         let results = res.unwrap();
         assert_eq!(results[0].sequence_count, 0);
@@ -717,7 +790,7 @@ mod tests {
         let mut temp_file = std::env::temp_dir();
         temp_file.push("invalid.naf");
         fs::write(&temp_file, b"this is not a valid naf file").unwrap();
-        let res = process_naf_file(&temp_file, false);
+        let res = process_naf_file(&temp_file, false, 0);
         assert!(res.is_err());
         let _ = fs::remove_file(temp_file);
     }
