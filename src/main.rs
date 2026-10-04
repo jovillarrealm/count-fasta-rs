@@ -121,6 +121,10 @@ struct Args {
     /// Useful for debugging or if SIMD causes issues on specific hardware.
     #[clap(long)]
     no_simd: bool,
+
+    /// Include extended assembly metrics (N25, N75, N90, L25, L50, L75, L90).
+    #[clap(short = 'e', long = "extended")]
+    extended: bool,
 }
 
 fn main() {
@@ -178,7 +182,7 @@ fn main() {
 
     if !has_file_output {
         for result in &results {
-            print_results(result, args.legacy);
+            print_results(result, args.legacy, args.extended);
         }
     }
 
@@ -245,7 +249,7 @@ fn determine_threads(files: Option<&[PathBuf]>, threads: Option<usize>) -> usize
     available_threads
 }
 
-fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
+fn print_results(results: &process_files::AnalysisResults, legacy: bool, extended: bool) {
     if !legacy {
         println!("\nFile name:\t{} ", results.filename);
     } else {
@@ -260,22 +264,26 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
     println!("Average contig length is:\t{} bp", avg_len);
     println!("Largest contig:\t\t{} bp", results.largest_contig);
     println!("Shortest contig:\t\t{} bp", results.shortest_contig);
-    println!(
-        "N25 stats:\t\t\t25% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n25_sequence_count, results.n25
-    );
+    if extended {
+        println!(
+            "N25 stats:\t\t\t25% of total sequence length is contained in the {} sequences >= {} bp",
+            results.n25_sequence_count, results.n25
+        );
+    }
     println!(
         "N50 stats:\t\t\t50% of total sequence length is contained in the {} sequences >= {} bp",
         results.n50_sequence_count, results.n50
     );
-    println!(
-        "N75 stats:\t\t\t75% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n75_sequence_count, results.n75
-    );
-    println!(
-        "N90 stats:\t\t\t90% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n90_sequence_count, results.n90
-    );
+    if extended {
+        println!(
+            "N75 stats:\t\t\t75% of total sequence length is contained in the {} sequences >= {} bp",
+            results.n75_sequence_count, results.n75
+        );
+        println!(
+            "N90 stats:\t\t\t90% of total sequence length is contained in the {} sequences >= {} bp",
+            results.n90_sequence_count, results.n90
+        );
+    }
     println!("Total GC count:\t\t\t{} bp", results.gc_count);
     println!(
         "GC %:\t\t\t\t{:.2} %",

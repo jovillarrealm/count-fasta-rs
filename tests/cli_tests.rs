@@ -29,6 +29,36 @@ fn test_cli_min_length_partial() {
 }
 
 #[test]
+fn test_cli_default_terminal_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .arg("test/multi_seq.fa")
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("N50 stats:"));
+    assert!(!stdout.contains("N25 stats:"));
+    assert!(!stdout.contains("N75 stats:"));
+    assert!(!stdout.contains("N90 stats:"));
+}
+
+#[test]
+fn test_cli_extended_terminal_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .args(&["-e", "test/multi_seq.fa"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("N25 stats:"));
+    assert!(stdout.contains("N50 stats:"));
+    assert!(stdout.contains("N75 stats:"));
+    assert!(stdout.contains("N90 stats:"));
+}
+
+#[test]
 fn test_cli_csv_rfc4180() {
     let temp_csv = "test/test_rfc4180.csv";
     if std::path::Path::new(temp_csv).exists() {
