@@ -59,8 +59,8 @@ fn test_cli_extended_terminal_output() {
 }
 
 #[test]
-fn test_cli_csv_rfc4180() {
-    let temp_csv = "test/test_rfc4180.csv";
+fn test_cli_default_csv_semicolon() {
+    let temp_csv = "test/test_default.csv";
     if std::path::Path::new(temp_csv).exists() {
         let _ = std::fs::remove_file(temp_csv);
     }
@@ -73,7 +73,56 @@ fn test_cli_csv_rfc4180() {
     assert!(output.status.success());
     let content = std::fs::read_to_string(temp_csv).expect("Failed to read CSV");
     let lines: Vec<&str> = content.lines().collect();
-    assert_eq!(lines[0], "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n25,l25,n50,l50,n75,l75,n90,l90,gc_count,gc_pct,n_count,n_pct");
+    assert_eq!(
+        lines[0],
+        "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage"
+    );
+    assert_eq!(lines[1], "multi_seq.fa;24;4;6;8;4;8;33.3333333;0;0.0000000");
+    let _ = std::fs::remove_file(temp_csv);
+}
+
+#[test]
+fn test_cli_csv_comma_classic() {
+    let temp_csv = "test/test_comma_classic.csv";
+    if std::path::Path::new(temp_csv).exists() {
+        let _ = std::fs::remove_file(temp_csv);
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .args(&["-c", temp_csv, "--comma", "test/multi_seq.fa"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let content = std::fs::read_to_string(temp_csv).expect("Failed to read CSV");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(
+        lines[0],
+        "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n50,l50,gc_count,gc_pct,n_count,n_pct"
+    );
+    assert_eq!(lines[1], "multi_seq.fa,24,4,6,8,4,8,2,8,33.33,0,0.00");
+    let _ = std::fs::remove_file(temp_csv);
+}
+
+#[test]
+fn test_cli_csv_comma_extended() {
+    let temp_csv = "test/test_comma_extended.csv";
+    if std::path::Path::new(temp_csv).exists() {
+        let _ = std::fs::remove_file(temp_csv);
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .args(&["-c", temp_csv, "--comma", "-e", "test/multi_seq.fa"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let content = std::fs::read_to_string(temp_csv).expect("Failed to read CSV");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(
+        lines[0],
+        "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n25,l25,n50,l50,n75,l75,n90,l90,gc_count,gc_pct,n_count,n_pct"
+    );
     let _ = std::fs::remove_file(temp_csv);
 }
 
@@ -85,7 +134,7 @@ fn test_cli_tsv_export() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["--tsv", temp_tsv, "test/multi_seq.fa"])
+        .args(&["--tsv", temp_tsv, "-e", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 

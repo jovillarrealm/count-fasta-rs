@@ -125,6 +125,10 @@ struct Args {
     /// Include extended assembly metrics (N25, N75, N90, L25, L50, L75, L90).
     #[clap(short = 'e', long = "extended")]
     extended: bool,
+
+    /// Output CSV in RFC 4180 comma-separated format instead of default semicolon format.
+    #[clap(long)]
+    comma: bool,
 }
 
 fn main() {
@@ -160,21 +164,21 @@ fn main() {
     let has_file_output = args.csv.is_some() || args.tsv.is_some() || args.json.is_some();
 
     if let Some(ref csv_file) = args.csv
-        && let Err(e) = append_to_csv(&results, csv_file, args.legacy)
+        && let Err(e) = append_to_csv(&results, csv_file, args.comma && !args.legacy, args.extended)
     {
         eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
         exit_error = true;
     }
 
     if let Some(ref tsv_file) = args.tsv
-        && let Err(e) = append_to_tsv(&results, tsv_file)
+        && let Err(e) = append_to_tsv(&results, tsv_file, args.extended)
     {
         eprintln!("Failed to write TSV file '{}': {}", tsv_file, e);
         exit_error = true;
     }
 
     if let Some(ref json_file) = args.json
-        && let Err(e) = write_to_json(&results, json_file)
+        && let Err(e) = write_to_json(&results, json_file, args.extended)
     {
         eprintln!("Failed to write JSON file '{}': {}", json_file, e);
         exit_error = true;
@@ -304,22 +308,28 @@ pub struct AssemblyReport {
     pub average_length: usize,
     pub largest_contig: usize,
     pub shortest_contig: usize,
-    pub n25: usize,
-    pub l25: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n25: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l25: Option<usize>,
     pub n50: usize,
     pub l50: usize,
-    pub n75: usize,
-    pub l75: usize,
-    pub n90: usize,
-    pub l90: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n75: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l75: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n90: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l90: Option<usize>,
     pub gc_count: usize,
     pub gc_pct: f64,
     pub n_count: usize,
     pub n_pct: f64,
 }
 
-impl From<&process_files::AnalysisResults> for AssemblyReport {
-    fn from(result: &process_files::AnalysisResults) -> Self {
+impl AssemblyReport {
+    pub fn from_analysis(result: &process_files::AnalysisResults, extended: bool) -> Self {
         let average_length = if result.sequence_count > 0 {
             (result.total_length as f64 / result.sequence_count as f64).round() as usize
         } else {
@@ -343,14 +353,14 @@ impl From<&process_files::AnalysisResults> for AssemblyReport {
             average_length,
             largest_contig: result.largest_contig,
             shortest_contig: result.shortest_contig,
-            n25: result.n25,
-            l25: result.l25,
+            n25: if extended { Some(result.n25) } else { None },
+            l25: if extended { Some(result.l25) } else { None },
             n50: result.n50,
             l50: result.l50,
-            n75: result.n75,
-            l75: result.l75,
-            n90: result.n90,
-            l90: result.l90,
+            n75: if extended { Some(result.n75) } else { None },
+            l75: if extended { Some(result.l75) } else { None },
+            n90: if extended { Some(result.n90) } else { None },
+            l90: if extended { Some(result.l90) } else { None },
             gc_count: result.gc_count,
             gc_pct,
             n_count: result.n_count,
@@ -370,7 +380,8 @@ fn escape_csv(val: &str) -> String {
 fn append_to_csv(
     results: &[process_files::AnalysisResults],
     csv_filename: &str,
-    legacy: bool,
+    comma: bool,
+    extended: bool,
 ) -> io::Result<()> {
     let csv_exists = Path::new(csv_filename).exists();
     let file = std::fs::OpenOptions::new()
@@ -380,8 +391,16 @@ fn append_to_csv(
     let mut writer = std::io::BufWriter::new(file);
 
     if !csv_exists {
-        if legacy {
-            let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
+        if !comma {
+            if !extended {
+                let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
+                writer.write_all(header.as_bytes())?;
+            } else {
+                let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N25;L25;N50;L50;N75;L75;N90;L90;GC_percentage;total_N;N_percentage\n";
+                writer.write_all(header.as_bytes())?;
+            }
+        } else if !extended {
+            let header = "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n50,l50,gc_count,gc_pct,n_count,n_pct\n";
             writer.write_all(header.as_bytes())?;
         } else {
             let header = "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n25,l25,n50,l50,n75,l75,n90,l90,gc_count,gc_pct,n_count,n_pct\n";
@@ -389,7 +408,7 @@ fn append_to_csv(
         }
     }
 
-    if legacy {
+    if !comma {
         for result in results {
             let avg_len = if result.sequence_count > 0 {
                 (result.total_length as f64 / result.sequence_count as f64).round() as usize
@@ -407,41 +426,155 @@ fn append_to_csv(
                 0.0
             };
 
-            writeln!(
-                writer,
-                "{};{};{};{};{};{};{};{:.7};{};{:.7}",
-                result.filename,
-                result.total_length,
-                result.sequence_count,
-                avg_len,
-                result.largest_contig,
-                result.shortest_contig,
-                result.n50,
-                gc_pct,
-                result.n_count,
-                n_pct,
-            )?;
+            if !extended {
+                writeln!(
+                    writer,
+                    "{};{};{};{};{};{};{};{:.7};{};{:.7}",
+                    result.filename,
+                    result.total_length,
+                    result.sequence_count,
+                    avg_len,
+                    result.largest_contig,
+                    result.shortest_contig,
+                    result.n50,
+                    gc_pct,
+                    result.n_count,
+                    n_pct,
+                )?;
+            } else {
+                writeln!(
+                    writer,
+                    "{};{};{};{};{};{};{};{};{};{};{};{};{};{};{:.7};{};{:.7}",
+                    result.filename,
+                    result.total_length,
+                    result.sequence_count,
+                    avg_len,
+                    result.largest_contig,
+                    result.shortest_contig,
+                    result.n25,
+                    result.l25,
+                    result.n50,
+                    result.l50,
+                    result.n75,
+                    result.l75,
+                    result.n90,
+                    result.l90,
+                    gc_pct,
+                    result.n_count,
+                    n_pct,
+                )?;
+            }
         }
     } else {
         for result in results {
-            let report = AssemblyReport::from(result);
+            let report = AssemblyReport::from_analysis(result, extended);
+            if !extended {
+                writeln!(
+                    writer,
+                    "{},{},{},{},{},{},{},{},{},{:.2},{},{:.2}",
+                    escape_csv(&report.filename),
+                    report.total_length,
+                    report.sequence_count,
+                    report.average_length,
+                    report.largest_contig,
+                    report.shortest_contig,
+                    report.n50,
+                    report.l50,
+                    report.gc_count,
+                    report.gc_pct,
+                    report.n_count,
+                    report.n_pct,
+                )?;
+            } else {
+                writeln!(
+                    writer,
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{:.2}",
+                    escape_csv(&report.filename),
+                    report.total_length,
+                    report.sequence_count,
+                    report.average_length,
+                    report.largest_contig,
+                    report.shortest_contig,
+                    report.n25.unwrap_or(0),
+                    report.l25.unwrap_or(0),
+                    report.n50,
+                    report.l50,
+                    report.n75.unwrap_or(0),
+                    report.l75.unwrap_or(0),
+                    report.n90.unwrap_or(0),
+                    report.l90.unwrap_or(0),
+                    report.gc_count,
+                    report.gc_pct,
+                    report.n_count,
+                    report.n_pct,
+                )?;
+            }
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn append_to_tsv(
+    results: &[process_files::AnalysisResults],
+    tsv_filename: &str,
+    extended: bool,
+) -> io::Result<()> {
+    let tsv_exists = Path::new(tsv_filename).exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(tsv_filename)?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    if !tsv_exists {
+        if !extended {
+            let header = "filename\ttotal_length\tsequence_count\taverage_length\tlargest_contig\tshortest_contig\tn50\tl50\tgc_count\tgc_pct\tn_count\tn_pct\n";
+            writer.write_all(header.as_bytes())?;
+        } else {
+            let header = "filename\ttotal_length\tsequence_count\taverage_length\tlargest_contig\tshortest_contig\tn25\tl25\tn50\tl50\tn75\tl75\tn90\tl90\tgc_count\tgc_pct\tn_count\tn_pct\n";
+            writer.write_all(header.as_bytes())?;
+        }
+    }
+
+    for result in results {
+        let report = AssemblyReport::from_analysis(result, extended);
+        if !extended {
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{:.2}",
-                escape_csv(&report.filename),
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{:.2}",
+                report.filename,
                 report.total_length,
                 report.sequence_count,
                 report.average_length,
                 report.largest_contig,
                 report.shortest_contig,
-                report.n25,
-                report.l25,
                 report.n50,
                 report.l50,
-                report.n75,
-                report.l75,
-                report.n90,
-                report.l90,
+                report.gc_count,
+                report.gc_pct,
+                report.n_count,
+                report.n_pct,
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{:.2}",
+                report.filename,
+                report.total_length,
+                report.sequence_count,
+                report.average_length,
+                report.largest_contig,
+                report.shortest_contig,
+                report.n25.unwrap_or(0),
+                report.l25.unwrap_or(0),
+                report.n50,
+                report.l50,
+                report.n75.unwrap_or(0),
+                report.l75.unwrap_or(0),
+                report.n90.unwrap_or(0),
+                report.l90.unwrap_or(0),
                 report.gc_count,
                 report.gc_pct,
                 report.n_count,
@@ -454,55 +587,10 @@ fn append_to_csv(
     Ok(())
 }
 
-fn append_to_tsv(
-    results: &[process_files::AnalysisResults],
-    tsv_filename: &str,
-) -> io::Result<()> {
-    let tsv_exists = Path::new(tsv_filename).exists();
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(tsv_filename)?;
-    let mut writer = std::io::BufWriter::new(file);
-
-    if !tsv_exists {
-        let header = "filename\ttotal_length\tsequence_count\taverage_length\tlargest_contig\tshortest_contig\tn25\tl25\tn50\tl50\tn75\tl75\tn90\tl90\tgc_count\tgc_pct\tn_count\tn_pct\n";
-        writer.write_all(header.as_bytes())?;
-    }
-
-    for result in results {
-        let report = AssemblyReport::from(result);
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{:.2}",
-            report.filename,
-            report.total_length,
-            report.sequence_count,
-            report.average_length,
-            report.largest_contig,
-            report.shortest_contig,
-            report.n25,
-            report.l25,
-            report.n50,
-            report.l50,
-            report.n75,
-            report.l75,
-            report.n90,
-            report.l90,
-            report.gc_count,
-            report.gc_pct,
-            report.n_count,
-            report.n_pct,
-        )?;
-    }
-
-    writer.flush()?;
-    Ok(())
-}
-
 fn write_to_json(
     results: &[process_files::AnalysisResults],
     json_filename: &str,
+    extended: bool,
 ) -> io::Result<()> {
     let mut reports: Vec<AssemblyReport> = if Path::new(json_filename).exists() {
         if let Ok(file) = std::fs::File::open(json_filename) {
@@ -513,7 +601,7 @@ fn write_to_json(
     } else {
         Vec::new()
     };
-    reports.extend(results.iter().map(AssemblyReport::from));
+    reports.extend(results.iter().map(|r| AssemblyReport::from_analysis(r, extended)));
 
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -548,7 +636,7 @@ mod tests {
             let _ = fs::remove_file(csv_file);
         }
 
-        append_to_csv(&results, &csv_file, true).expect("Failed to write CSV");
+        append_to_csv(&results, &csv_file, false, false).expect("Failed to write CSV");
         let mut thing: Vec<String> = fs::read_to_string("test/test.csv")
             .unwrap()
             .lines()
