@@ -98,7 +98,7 @@ fn test_compare_perl_script() {
 
     // Build first to ensure up-to-date
     let status = Command::new("cargo")
-        .args(&["build", "--quiet"])
+        .args(["build", "--quiet"])
         .status()
         .expect("Failed to build");
     assert!(status.success());
@@ -137,7 +137,7 @@ fn test_compare_perl_script() {
             let rust_val = rust_metrics.get(key);
             
             // Allow Perl to report "bp" for Shortest contig when it fails (common for single-sequence files)
-            if key == "Shortest contig" && perl_val.map_or(false, |v| v == "bp") {
+            if key == "Shortest contig" && perl_val.is_some_and(|v| v == "bp") {
                 continue;
             }
 

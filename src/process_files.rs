@@ -65,19 +65,19 @@ pub fn process_any_file(
     file: &Path,
     no_simd: bool,
     min_length: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+) -> std::io::Result<(Vec<AnalysisResults>, bool)> {
     if file == Path::new("-") {
-        return process_stdin(no_simd, min_length).map(|r| vec![r]);
+        return process_stdin(no_simd, min_length).map(|r| (vec![r], false));
     }
     match FileFormat::from_path(file) {
-        FileFormat::Gzip => process_gz_file(file, no_simd, min_length),
+        FileFormat::Gzip => process_gz_file(file, no_simd, min_length).map(|r| (r, false)),
         FileFormat::Zip => process_zip_file(file, no_simd, min_length),
-        FileFormat::Xz => process_xz_file(file, no_simd, min_length),
-        FileFormat::Bzip2 => process_bz2_file(file, no_simd, min_length),
-        FileFormat::Bgzip => process_bgzip_file(file, no_simd, min_length),
-        FileFormat::Naf => process_naf_file(file, no_simd, min_length),
-        FileFormat::Fasta => process_fasta_file(file, no_simd, min_length),
-        FileFormat::Unknown => Ok(Vec::new()),
+        FileFormat::Xz => process_xz_file(file, no_simd, min_length).map(|r| (r, false)),
+        FileFormat::Bzip2 => process_bz2_file(file, no_simd, min_length).map(|r| (r, false)),
+        FileFormat::Bgzip => process_bgzip_file(file, no_simd, min_length).map(|r| (r, false)),
+        FileFormat::Naf => process_naf_file(file, no_simd, min_length).map(|r| (r, false)),
+        FileFormat::Fasta => process_fasta_file(file, no_simd, min_length).map(|r| (r, false)),
+        FileFormat::Unknown => Ok((Vec::new(), false)),
     }
 }
 
@@ -215,7 +215,6 @@ pub struct AnalysisResults {
     pub n75_sequence_count: usize,
     pub l75: usize,
     pub n90: usize,
-    pub n90_sequence_count: usize,
     pub l90: usize,
     pub largest_contig: usize,
     pub shortest_contig: usize,
@@ -274,7 +273,6 @@ impl AnalysisResults {
             }
             if self.n90 == 0 && cumulative_length >= threshold_90 {
                 self.n90 = length;
-                self.n90_sequence_count = i + 1;
                 self.l90 = i + 1;
                 break;
             }
@@ -435,7 +433,7 @@ pub fn process_zip_file(
     file: &Path,
     no_simd: bool,
     min_length: usize,
-) -> std::io::Result<Vec<AnalysisResults>> {
+) -> std::io::Result<(Vec<AnalysisResults>, bool)> {
     let archive_name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -444,6 +442,7 @@ pub fn process_zip_file(
     let buf_reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file_handle);
     let mut archive = ZipArchive::new(buf_reader)?;
     let mut all_results = Vec::new();
+    let mut member_error = false;
 
     for i in 0..archive.len() {
         let zip_file = archive.by_index(i)?;
@@ -451,10 +450,11 @@ pub fn process_zip_file(
             let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
                 let composite_name = format!("{archive_name}#{file_name}");
-                let mut result = AnalysisResults::new(composite_name);
+                let mut result = AnalysisResults::new(composite_name.clone());
                 let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, zip_file);
                 if let Err(e) = process_reader(reader, &mut result, no_simd, min_length) {
-                    eprintln!("Error processing {file_name}: {e}");
+                    eprintln!("Error processing {composite_name}: {e}");
+                    member_error = true;
                     continue; // Skip this file but continue processing others
                 };
                 all_results.push(result);
@@ -462,7 +462,7 @@ pub fn process_zip_file(
         }
     }
 
-    Ok(all_results)
+    Ok((all_results, member_error))
 }
 
 pub fn process_reader<R: Read>(
@@ -533,7 +533,6 @@ mod tests {
         assert_eq!(results.l75, 3);
         assert_eq!(results.n90, 200);
         assert_eq!(results.l90, 3);
-        assert_eq!(results.n90_sequence_count, 3);
     }
 
     #[test]
@@ -747,7 +746,7 @@ mod tests {
         struct FailingReader;
         impl Read for FailingReader {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "forced failure"))
+                Err(std::io::Error::other("forced failure"))
             }
         }
         let reader = BufReader::new(FailingReader);

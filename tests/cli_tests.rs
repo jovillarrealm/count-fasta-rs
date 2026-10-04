@@ -3,7 +3,7 @@ use std::process::Command;
 #[test]
 fn test_cli_min_length_all_excluded() {
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-m", "10", "test/multi_seq.fa"])
+        .args(["-m", "10", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -11,12 +11,14 @@ fn test_cli_min_length_all_excluded() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Total length of sequence:\t0 bp"));
     assert!(stdout.contains("Total number of sequences:\t0"));
+    assert!(stdout.contains("Largest contig:\t\t0 bp"));
+    assert!(stdout.contains("Shortest contig:\t\t0 bp"));
 }
 
 #[test]
 fn test_cli_min_length_partial() {
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-m", "7", "test/multi_seq.fa"])
+        .args(["-m", "7", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -46,7 +48,7 @@ fn test_cli_default_terminal_output() {
 #[test]
 fn test_cli_extended_terminal_output() {
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-e", "test/multi_seq.fa"])
+        .args(["-e", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -66,7 +68,7 @@ fn test_cli_default_csv_semicolon() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-c", temp_csv, "test/multi_seq.fa"])
+        .args(["-c", temp_csv, "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -89,7 +91,7 @@ fn test_cli_csv_comma_classic() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-c", temp_csv, "--comma", "test/multi_seq.fa"])
+        .args(["-c", temp_csv, "--comma", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -98,9 +100,9 @@ fn test_cli_csv_comma_classic() {
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(
         lines[0],
-        "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n50,l50,gc_count,gc_pct,n_count,n_pct"
+        "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n50,gc_count,gc_pct,n_count,n_pct"
     );
-    assert_eq!(lines[1], "multi_seq.fa,24,4,6,8,4,8,2,8,33.33,0,0.00");
+    assert_eq!(lines[1], "multi_seq.fa,24,4,6,8,4,8,8,33.33,0,0.00");
     let _ = std::fs::remove_file(temp_csv);
 }
 
@@ -112,7 +114,7 @@ fn test_cli_csv_comma_extended() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-c", temp_csv, "--comma", "-e", "test/multi_seq.fa"])
+        .args(["-c", temp_csv, "--comma", "-e", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -134,7 +136,7 @@ fn test_cli_tsv_export() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["--tsv", temp_tsv, "-e", "test/multi_seq.fa"])
+        .args(["--tsv", temp_tsv, "-e", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -153,7 +155,7 @@ fn test_cli_json_export() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["--json", temp_json, "test/multi_seq.fa"])
+        .args(["--json", temp_json, "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -163,6 +165,8 @@ fn test_cli_json_export() {
     assert!(v.is_array());
     assert_eq!(v[0]["total_length"], 24);
     assert_eq!(v[0]["sequence_count"], 4);
+    assert!(v[0].get("l50").is_none());
+    assert!(v[0].get("n50").is_some());
     let _ = std::fs::remove_file(temp_json);
 }
 
@@ -174,7 +178,7 @@ fn test_cli_legacy_csv_export() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["-c", temp_csv, "--legacy", "test/multi_seq.fa"])
+        .args(["-c", temp_csv, "--legacy", "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
@@ -204,7 +208,7 @@ fn test_cli_zip_archive_provenance() {
     zip.finish().unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&["--json", temp_json, zip_path])
+        .args(["--json", temp_json, zip_path])
         .output()
         .expect("Failed to execute binary");
 
@@ -274,7 +278,7 @@ fn test_cli_resilient_batch_execution() {
     std::fs::write(corrupt_gz, b"not valid gzip data").expect("Write corrupt gz");
 
     let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
-        .args(&[corrupt_gz, "test/multi_seq.fa"])
+        .args([corrupt_gz, "test/multi_seq.fa"])
         .output()
         .expect("Failed to execute binary");
 
