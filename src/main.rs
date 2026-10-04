@@ -155,25 +155,25 @@ fn main() {
 
     let has_file_output = args.csv.is_some() || args.tsv.is_some() || args.json.is_some();
 
-    if let Some(ref csv_file) = args.csv {
-        if let Err(e) = append_to_csv(&results, csv_file, args.legacy) {
-            eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
-            exit_error = true;
-        }
+    if let Some(ref csv_file) = args.csv
+        && let Err(e) = append_to_csv(&results, csv_file, args.legacy)
+    {
+        eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
+        exit_error = true;
     }
 
-    if let Some(ref tsv_file) = args.tsv {
-        if let Err(e) = append_to_tsv(&results, tsv_file) {
-            eprintln!("Failed to write TSV file '{}': {}", tsv_file, e);
-            exit_error = true;
-        }
+    if let Some(ref tsv_file) = args.tsv
+        && let Err(e) = append_to_tsv(&results, tsv_file)
+    {
+        eprintln!("Failed to write TSV file '{}': {}", tsv_file, e);
+        exit_error = true;
     }
 
-    if let Some(ref json_file) = args.json {
-        if let Err(e) = write_to_json(&results, json_file) {
-            eprintln!("Failed to write JSON file '{}': {}", json_file, e);
-            exit_error = true;
-        }
+    if let Some(ref json_file) = args.json
+        && let Err(e) = write_to_json(&results, json_file)
+    {
+        eprintln!("Failed to write JSON file '{}': {}", json_file, e);
+        exit_error = true;
     }
 
     if !has_file_output {
@@ -514,7 +514,7 @@ fn write_to_json(
         .open(json_filename)?;
     let mut writer = std::io::BufWriter::new(file);
     serde_json::to_writer_pretty(&mut writer, &reports)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     writer.flush()?;
     Ok(())
 }
