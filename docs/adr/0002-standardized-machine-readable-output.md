@@ -6,10 +6,16 @@ The legacy implementation emitted semicolon-separated values under `-c/--csv` wi
 
 ## Decision
 
-We standardize machine-readable exports to RFC 4180-compliant comma-separated values (CSV) for `--csv`, while offering explicit `--tsv` and `--json` format options. All metrics—including N25, N50, N75, N90, L25, L50, L75, and L90—are unified and output by default without requiring an extra configuration flag.
+To avoid breaking existing users' workflows and legacy scripts, we preserve backwards compatibility by default:
+- Default `-c, --csv <FILE>` continues to emit semicolon-delimited values matching historical output and schemas.
+- Default terminal stdout output continues to display the classic metrics suite (including N50).
+- Standard RFC 4180 comma-separated values (CSV) can be requested using the explicit `--comma` flag.
+- Extended continuity metrics ($N_{25}, N_{75}, N_{90}$ and $L_{25}, L_{50}, L_{75}, L_{90}$) can be requested across interactive and machine-readable exports using the `-e, --extended` flag.
+- Dedicated `--tsv` and `--json` format options provide native TSV and JSON serialization.
 
 ## Consequences
 
-- Direct interoperability with standard CSV/TSV parsers without custom delimiter flags.
-- Comprehensive assembly continuity statistics (N25–N90 and L25–L90) are always available in both interactive and tabular/JSON outputs without multi-tiered flags.
-- Legacy semicolon output is preserved only under the `--legacy` debugging flag.
+- Existing user scripts, Excel workflows, and regression tests relying on semicolon-delimited CSV and classic terminal output continue to run without any breakage.
+- Modern bioinformatics pipelines (Nextflow, Snakemake, Pandas, R) can opt into RFC 4180 comma-separated records via `--comma`.
+- Detailed continuity metrics ($N_{25}$–$N_{90}$ and $L_{25}$–$L_{90}$) are available on demand via `-e, --extended` across terminal, CSV, TSV, and JSON formats.
+- The `--legacy` flag is retained for explicit historical debugging.

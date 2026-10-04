@@ -50,10 +50,15 @@ TUTORIAL & EXAMPLES:
    Process all valid files within a directory (non-recursive). You can specify multiple directories:
      $ count-fasta-rs -d ./genomes -d ./more_genomes
 
-4. Saving Results to CSV
-   Append results to a CSV file for easy analysis in Excel/Pandas:
+4. Saving Results to CSV / TSV / JSON
+   Append results to a CSV file (default semicolon-separated for backward compatibility):
      $ count-fasta-rs -c results.csv -d ./genomes
-   (Note: If 'results.csv' exists, new rows are appended. If not, it's created with a header.)
+   Output standard RFC 4180 comma-separated CSV:
+     $ count-fasta-rs -c results.csv --comma -d ./genomes
+   Export to TSV or JSON:
+     $ count-fasta-rs --tsv results.tsv --json results.json genome.fna
+   Include extended assembly metrics (N25, N75, N90, L25, L50, L75, L90):
+     $ count-fasta-rs -e -c results.csv --comma genome.fna
 
 5. Performance Tuning
    - Threads: By default, it uses all available cores. Limit this with -t:

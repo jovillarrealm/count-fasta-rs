@@ -17,7 +17,7 @@ A discrete header line (prefixed by `>`) followed by one or more lines of nucleo
 _Avoid_: FASTA blob, entry chunk
 
 **Assembly Metrics**:
-A unified suite of statistical summarizations characterizing assembly continuity, size distribution, and nucleotide composition (total length, contig counts, average length, largest/shortest contigs, N25/N50/N75/N90, L25/L50/L75/L90, GC%, and N%) included by default in all reports.
+A suite of statistical summarizations characterizing assembly continuity, size distribution, and nucleotide composition (total length, contig counts, average length, largest/shortest contigs, N50, GC%, and N% by default, with extended continuity metrics N25/N75/N90 and L25/L50/L75/L90 available via `-e, --extended`).
 _Avoid_: Quality scores, variant statistics, alignment summary
 
 **Nx Metric (N25, N50, N75, N90)**:
