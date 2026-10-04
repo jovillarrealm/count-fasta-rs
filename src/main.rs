@@ -133,46 +133,57 @@ fn main() {
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     let mut files_to_process = Vec::new();
+    let mut directory_error = false;
     for dir in args.directory {
         match get_fasta_files_from_directory(&dir) {
             Ok(files) => files_to_process.extend(files),
             Err(e) => {
                 eprintln!("Error reading directory '{}': {}", dir, e);
-                std::process::exit(1);
+                directory_error = true;
             }
         }
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
-    let results = process_files(files_to_process, args.threads, args.no_simd, args.min_length);
+    if files_to_process.is_empty() && !directory_error {
+        files_to_process.push(PathBuf::from("-"));
+    }
+
+    let (results, processing_error) =
+        process_files(files_to_process, args.threads, args.no_simd, args.min_length);
+    let mut exit_error = directory_error || processing_error;
 
     let has_file_output = args.csv.is_some() || args.tsv.is_some() || args.json.is_some();
 
     if let Some(ref csv_file) = args.csv {
         if let Err(e) = append_to_csv(&results, csv_file, args.legacy) {
             eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
-            std::process::exit(1);
+            exit_error = true;
         }
     }
 
     if let Some(ref tsv_file) = args.tsv {
         if let Err(e) = append_to_tsv(&results, tsv_file) {
             eprintln!("Failed to write TSV file '{}': {}", tsv_file, e);
-            std::process::exit(1);
+            exit_error = true;
         }
     }
 
     if let Some(ref json_file) = args.json {
         if let Err(e) = write_to_json(&results, json_file) {
             eprintln!("Failed to write JSON file '{}': {}", json_file, e);
-            std::process::exit(1);
+            exit_error = true;
         }
     }
 
     if !has_file_output {
-        for result in results {
-            print_results(&result, args.legacy);
+        for result in &results {
+            print_results(result, args.legacy);
         }
+    }
+
+    if exit_error {
+        std::process::exit(1);
     }
 }
 
@@ -195,13 +206,14 @@ fn process_files(
     threads: Option<usize>,
     no_simd: bool,
     min_length: usize,
-) -> Vec<process_files::AnalysisResults> {
+) -> (Vec<process_files::AnalysisResults>, bool) {
     let available_threads = determine_threads(Some(&files), threads);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .build()
         .unwrap();
-    pool.install(|| {
+    let had_error = std::sync::atomic::AtomicBool::new(false);
+    let results: Vec<process_files::AnalysisResults> = pool.install(|| {
         files
             .par_iter()
             .flat_map(
@@ -209,12 +221,14 @@ fn process_files(
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("Error processing file {:?}: {}", file, e);
+                        had_error.store(true, std::sync::atomic::Ordering::Relaxed);
                         Vec::new()
                     }
                 },
             )
             .collect()
-    })
+    });
+    (results, had_error.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn determine_threads(files: Option<&[PathBuf]>, threads: Option<usize>) -> usize {
@@ -519,7 +533,7 @@ mod tests {
             files_to_process.extend(files);
         }
 
-        let results = process_files(files_to_process, None, false, 0);
+        let (results, _) = process_files(files_to_process, None, false, 0);
 
         let csv_file = "test/attempt.csv";
         if Path::new(csv_file).exists() {

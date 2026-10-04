@@ -140,3 +140,79 @@ fn test_cli_zip_archive_provenance() {
     let _ = std::fs::remove_file(temp_json);
 }
 
+#[test]
+fn test_cli_stdin_piped() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn binary");
+
+    {
+        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+        stdin.write_all(b">seq1\nATGCATGC\n>seq2\nGCGC\n").unwrap();
+    }
+
+    let output = child.wait_with_output().expect("Failed to read output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("<stdin>"));
+    assert!(stdout.contains("Total length of sequence:\t12 bp"));
+    assert!(stdout.contains("Total number of sequences:\t2"));
+}
+
+#[test]
+fn test_cli_stdin_dash_argument() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn binary");
+
+    {
+        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+        stdin.write_all(b">seq1\nATGCATGC\n").unwrap();
+    }
+
+    let output = child.wait_with_output().expect("Failed to read output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("<stdin>"));
+    assert!(stdout.contains("Total length of sequence:\t8 bp"));
+    assert!(stdout.contains("Total number of sequences:\t1"));
+}
+
+#[test]
+fn test_cli_resilient_batch_execution() {
+    let corrupt_gz = "test/corrupt_batch.fa.gz";
+    std::fs::write(corrupt_gz, b"not valid gzip data").expect("Write corrupt gz");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_count-fasta-rs"))
+        .args(&[corrupt_gz, "test/multi_seq.fa"])
+        .output()
+        .expect("Failed to execute binary");
+
+    // Exit code must be 1 because at least one input failed
+    assert_eq!(output.status.code(), Some(1));
+
+    // Stderr must mention the failed file
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("corrupt_batch.fa.gz"));
+
+    // Stdout must contain results for the valid file
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("multi_seq.fa"));
+    assert!(stdout.contains("Total length of sequence:\t24 bp"));
+
+    let _ = std::fs::remove_file(corrupt_gz);
+}
+
+
+

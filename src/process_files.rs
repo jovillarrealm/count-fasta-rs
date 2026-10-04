@@ -50,11 +50,25 @@ impl FileFormat {
     }
 }
 
+pub fn process_stdin(
+    no_simd: bool,
+    min_length: usize,
+) -> std::io::Result<AnalysisResults> {
+    let mut results = AnalysisResults::new("<stdin>".to_string());
+    let stdin = std::io::stdin();
+    let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, stdin.lock());
+    process_reader(reader, &mut results, no_simd, min_length)?;
+    Ok(results)
+}
+
 pub fn process_any_file(
     file: &Path,
     no_simd: bool,
     min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
+    if file == Path::new("-") {
+        return process_stdin(no_simd, min_length).map(|r| vec![r]);
+    }
     match FileFormat::from_path(file) {
         FileFormat::Gzip => process_gz_file(file, no_simd, min_length),
         FileFormat::Zip => process_zip_file(file, no_simd, min_length),
