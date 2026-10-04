@@ -422,8 +422,12 @@ pub fn process_zip_file(
     no_simd: bool,
     min_length: usize,
 ) -> std::io::Result<Vec<AnalysisResults>> {
-    let file = open_file(file)?;
-    let buf_reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file);
+    let archive_name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive.zip".to_string());
+    let file_handle = open_file(file)?;
+    let buf_reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, file_handle);
     let mut archive = ZipArchive::new(buf_reader)?;
     let mut all_results = Vec::new();
 
@@ -432,13 +436,8 @@ pub fn process_zip_file(
         if zip_file.is_file() {
             let file_name = zip_file.name().to_owned();
             if VALID_FILES.iter().any(|&ext| file_name.ends_with(ext)) {
-                let mut result = AnalysisResults::new(
-                    Path::new(&file_name)
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string(),
-                );
+                let composite_name = format!("{archive_name}#{file_name}");
+                let mut result = AnalysisResults::new(composite_name);
                 let reader = BufReader::with_capacity(DECODER_BUFFER_SIZE, zip_file);
                 if let Err(e) = process_reader(reader, &mut result, no_simd, min_length) {
                     eprintln!("Error processing {file_name}: {e}");

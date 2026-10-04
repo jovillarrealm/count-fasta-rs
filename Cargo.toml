@@ -36,6 +36,8 @@ memmap2 = "0.9"
 memchr = "2.7.4"
 wide = "1.2.0"
 bytemuck = "1.25.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [features]
 default = []

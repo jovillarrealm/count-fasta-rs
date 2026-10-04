@@ -73,6 +73,17 @@ struct Args {
     #[clap(short, long, value_hint = clap::ValueHint::FilePath)]
     csv: Option<String>,
 
+    /// Path to the TSV file to be created or appended to.
+    ///
+    /// If the file does not exist, it will be created with a header.
+    /// If it exists, new results will be appended.
+    #[clap(long, value_hint = clap::ValueHint::FilePath)]
+    tsv: Option<String>,
+
+    /// Path to the JSON file to write results to.
+    #[clap(long, value_hint = clap::ValueHint::FilePath)]
+    json: Option<String>,
+
     /// Directory to process (non-recursive).
     ///
     /// The program will process all valid FASTA files found in these directories.
@@ -135,12 +146,30 @@ fn main() {
 
     let results = process_files(files_to_process, args.threads, args.no_simd, args.min_length);
 
-    if let Some(csv_file) = args.csv {
-        if let Err(e) = append_to_csv(&results, &csv_file) {
+    let has_file_output = args.csv.is_some() || args.tsv.is_some() || args.json.is_some();
+
+    if let Some(ref csv_file) = args.csv {
+        if let Err(e) = append_to_csv(&results, csv_file, args.legacy) {
             eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
             std::process::exit(1);
         }
-    } else {
+    }
+
+    if let Some(ref tsv_file) = args.tsv {
+        if let Err(e) = append_to_tsv(&results, tsv_file) {
+            eprintln!("Failed to write TSV file '{}': {}", tsv_file, e);
+            std::process::exit(1);
+        }
+    }
+
+    if let Some(ref json_file) = args.json {
+        if let Err(e) = write_to_json(&results, json_file) {
+            eprintln!("Failed to write JSON file '{}': {}", json_file, e);
+            std::process::exit(1);
+        }
+    }
+
+    if !has_file_output {
         for result in results {
             print_results(&result, args.legacy);
         }
@@ -245,7 +274,82 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
     );
 }
 
-fn append_to_csv(results: &[process_files::AnalysisResults], csv_filename: &str) -> io::Result<()> {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssemblyReport {
+    pub filename: String,
+    pub total_length: usize,
+    pub sequence_count: usize,
+    pub average_length: usize,
+    pub largest_contig: usize,
+    pub shortest_contig: usize,
+    pub n25: usize,
+    pub l25: usize,
+    pub n50: usize,
+    pub l50: usize,
+    pub n75: usize,
+    pub l75: usize,
+    pub n90: usize,
+    pub l90: usize,
+    pub gc_count: usize,
+    pub gc_pct: f64,
+    pub n_count: usize,
+    pub n_pct: f64,
+}
+
+impl From<&process_files::AnalysisResults> for AssemblyReport {
+    fn from(result: &process_files::AnalysisResults) -> Self {
+        let average_length = if result.sequence_count > 0 {
+            (result.total_length as f64 / result.sequence_count as f64).round() as usize
+        } else {
+            0
+        };
+        let gc_pct = if result.total_length > 0 {
+            ((result.gc_count as f64 / result.total_length as f64) * 10000.0).round() / 100.0
+        } else {
+            0.0
+        };
+        let n_pct = if result.total_length > 0 {
+            ((result.n_count as f64 / result.total_length as f64) * 10000.0).round() / 100.0
+        } else {
+            0.0
+        };
+
+        Self {
+            filename: result.filename.clone(),
+            total_length: result.total_length,
+            sequence_count: result.sequence_count,
+            average_length,
+            largest_contig: result.largest_contig,
+            shortest_contig: result.shortest_contig,
+            n25: result.n25,
+            l25: result.l25,
+            n50: result.n50,
+            l50: result.l50,
+            n75: result.n75,
+            l75: result.l75,
+            n90: result.n90,
+            l90: result.l90,
+            gc_count: result.gc_count,
+            gc_pct,
+            n_count: result.n_count,
+            n_pct,
+        }
+    }
+}
+
+fn escape_csv(val: &str) -> String {
+    if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+        format!("\"{}\"", val.replace('"', "\"\""))
+    } else {
+        val.to_string()
+    }
+}
+
+fn append_to_csv(
+    results: &[process_files::AnalysisResults],
+    csv_filename: &str,
+    legacy: bool,
+) -> io::Result<()> {
     let csv_exists = Path::new(csv_filename).exists();
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -254,43 +358,149 @@ fn append_to_csv(results: &[process_files::AnalysisResults], csv_filename: &str)
     let mut writer = std::io::BufWriter::new(file);
 
     if !csv_exists {
-        let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
+        if legacy {
+            let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
+            writer.write_all(header.as_bytes())?;
+        } else {
+            let header = "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n25,l25,n50,l50,n75,l75,n90,l90,gc_count,gc_pct,n_count,n_pct\n";
+            writer.write_all(header.as_bytes())?;
+        }
+    }
+
+    if legacy {
+        for result in results {
+            let avg_len = if result.sequence_count > 0 {
+                (result.total_length as f64 / result.sequence_count as f64).round() as usize
+            } else {
+                0
+            };
+            let gc_pct = if result.total_length > 0 {
+                (result.gc_count as f64 / result.total_length as f64) * 100.0
+            } else {
+                0.0
+            };
+            let n_pct = if result.total_length > 0 {
+                (result.n_count as f64 / result.total_length as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            writeln!(
+                writer,
+                "{};{};{};{};{};{};{};{:.7};{};{:.7}",
+                result.filename,
+                result.total_length,
+                result.sequence_count,
+                avg_len,
+                result.largest_contig,
+                result.shortest_contig,
+                result.n50,
+                gc_pct,
+                result.n_count,
+                n_pct,
+            )?;
+        }
+    } else {
+        for result in results {
+            let report = AssemblyReport::from(result);
+            writeln!(
+                writer,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{},{:.2}",
+                escape_csv(&report.filename),
+                report.total_length,
+                report.sequence_count,
+                report.average_length,
+                report.largest_contig,
+                report.shortest_contig,
+                report.n25,
+                report.l25,
+                report.n50,
+                report.l50,
+                report.n75,
+                report.l75,
+                report.n90,
+                report.l90,
+                report.gc_count,
+                report.gc_pct,
+                report.n_count,
+                report.n_pct,
+            )?;
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn append_to_tsv(
+    results: &[process_files::AnalysisResults],
+    tsv_filename: &str,
+) -> io::Result<()> {
+    let tsv_exists = Path::new(tsv_filename).exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(tsv_filename)?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    if !tsv_exists {
+        let header = "filename\ttotal_length\tsequence_count\taverage_length\tlargest_contig\tshortest_contig\tn25\tl25\tn50\tl50\tn75\tl75\tn90\tl90\tgc_count\tgc_pct\tn_count\tn_pct\n";
         writer.write_all(header.as_bytes())?;
     }
 
     for result in results {
-        let avg_len = if result.sequence_count > 0 {
-            (result.total_length as f64 / result.sequence_count as f64).round() as usize
-        } else {
-            0
-        };
-        let gc_pct = if result.total_length > 0 {
-            (result.gc_count as f64 / result.total_length as f64) * 100.0
-        } else {
-            0.0
-        };
-        let n_pct = if result.total_length > 0 {
-            (result.n_count as f64 / result.total_length as f64) * 100.0
-        } else {
-            0.0
-        };
-
+        let report = AssemblyReport::from(result);
         writeln!(
             writer,
-            "{};{};{};{};{};{};{};{:.7};{};{:.7}",
-            result.filename,
-            result.total_length,
-            result.sequence_count,
-            avg_len,
-            result.largest_contig,
-            result.shortest_contig,
-            result.n50,
-            gc_pct,
-            result.n_count,
-            n_pct,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{:.2}",
+            report.filename,
+            report.total_length,
+            report.sequence_count,
+            report.average_length,
+            report.largest_contig,
+            report.shortest_contig,
+            report.n25,
+            report.l25,
+            report.n50,
+            report.l50,
+            report.n75,
+            report.l75,
+            report.n90,
+            report.l90,
+            report.gc_count,
+            report.gc_pct,
+            report.n_count,
+            report.n_pct,
         )?;
     }
 
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_to_json(
+    results: &[process_files::AnalysisResults],
+    json_filename: &str,
+) -> io::Result<()> {
+    let mut reports: Vec<AssemblyReport> = if Path::new(json_filename).exists() {
+        if let Ok(file) = std::fs::File::open(json_filename) {
+            serde_json::from_reader(file).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    reports.extend(results.iter().map(AssemblyReport::from));
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(json_filename)?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, &reports)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     writer.flush()?;
     Ok(())
 }
@@ -316,7 +526,7 @@ mod tests {
             let _ = fs::remove_file(csv_file);
         }
 
-        append_to_csv(&results, &csv_file).expect("Failed to write CSV");
+        append_to_csv(&results, &csv_file, true).expect("Failed to write CSV");
         let mut thing: Vec<String> = fs::read_to_string("test/test.csv")
             .unwrap()
             .lines()
