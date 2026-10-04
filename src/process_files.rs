@@ -166,10 +166,16 @@ pub struct AnalysisResults {
     pub n_count: usize,
     pub n25: usize,
     pub n25_sequence_count: usize,
+    pub l25: usize,
     pub n50: usize,
     pub n50_sequence_count: usize,
+    pub l50: usize,
     pub n75: usize,
     pub n75_sequence_count: usize,
+    pub l75: usize,
+    pub n90: usize,
+    pub n90_sequence_count: usize,
+    pub l90: usize,
     pub largest_contig: usize,
     pub shortest_contig: usize,
 }
@@ -203,19 +209,32 @@ impl AnalysisResults {
         self.largest_contig = *lengths.first().unwrap_or(&0);
         self.shortest_contig = *lengths.last().unwrap_or(&usize::MAX);
 
+        let threshold_25 = (total_length as u128 * 25 / 100) as usize;
+        let threshold_50 = (total_length as u128 * 50 / 100) as usize;
+        let threshold_75 = (total_length as u128 * 75 / 100) as usize;
+        let threshold_90 = (total_length as u128 * 90 / 100) as usize;
+
         for (i, &length) in lengths.iter().enumerate() {
             cumulative_length += length;
-            if self.n25 == 0 && cumulative_length >= total_length / 4 {
+            if self.n25 == 0 && cumulative_length >= threshold_25 {
                 self.n25 = length;
                 self.n25_sequence_count = i + 1;
+                self.l25 = i + 1;
             }
-            if self.n50 == 0 && cumulative_length >= total_length / 2 {
+            if self.n50 == 0 && cumulative_length >= threshold_50 {
                 self.n50 = length;
                 self.n50_sequence_count = i + 1;
+                self.l50 = i + 1;
             }
-            if self.n75 == 0 && cumulative_length >= total_length * 3 / 4 {
+            if self.n75 == 0 && cumulative_length >= threshold_75 {
                 self.n75 = length;
                 self.n75_sequence_count = i + 1;
+                self.l75 = i + 1;
+            }
+            if self.n90 == 0 && cumulative_length >= threshold_90 {
+                self.n90 = length;
+                self.n90_sequence_count = i + 1;
+                self.l90 = i + 1;
                 break;
             }
         }
@@ -447,10 +466,35 @@ mod tests {
         assert_eq!(results.shortest_contig, 100);
         assert_eq!(results.n25, 400);
         assert_eq!(results.n25_sequence_count, 1);
+        assert_eq!(results.l25, 1);
         assert_eq!(results.n50, 300);
         assert_eq!(results.n50_sequence_count, 2);
+        assert_eq!(results.l50, 2);
         assert_eq!(results.n75, 200);
         assert_eq!(results.n75_sequence_count, 3);
+        assert_eq!(results.l75, 3);
+        assert_eq!(results.n90, 200);
+        assert_eq!(results.l90, 3);
+        assert_eq!(results.n90_sequence_count, 3);
+    }
+
+    #[test]
+    fn test_calculate_stats_single_contig() {
+        let mut results = AnalysisResults::new("single.fa".to_string());
+        results.calculate_stats(vec![500]);
+
+        assert_eq!(results.total_length, 500);
+        assert_eq!(results.sequence_count, 1);
+        assert_eq!(results.largest_contig, 500);
+        assert_eq!(results.shortest_contig, 500);
+        assert_eq!(results.n25, 500);
+        assert_eq!(results.l25, 1);
+        assert_eq!(results.n50, 500);
+        assert_eq!(results.l50, 1);
+        assert_eq!(results.n75, 500);
+        assert_eq!(results.l75, 1);
+        assert_eq!(results.n90, 500);
+        assert_eq!(results.l90, 1);
     }
 
     #[test]

@@ -222,6 +222,10 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
         "N75 stats:\t\t\t75% of total sequence length is contained in the {} sequences >= {} bp",
         results.n75_sequence_count, results.n75
     );
+    println!(
+        "N90 stats:\t\t\t90% of total sequence length is contained in the {} sequences >= {} bp",
+        results.n90_sequence_count, results.n90
+    );
     println!("Total GC count:\t\t\t{} bp", results.gc_count);
     println!(
         "GC %:\t\t\t\t{:.2} %",
