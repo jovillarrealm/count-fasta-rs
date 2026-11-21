@@ -50,10 +50,15 @@ TUTORIAL & EXAMPLES:
    Process all valid files within a directory (non-recursive). You can specify multiple directories:
      $ count-fasta-rs -d ./genomes -d ./more_genomes
 
-4. Saving Results to CSV
-   Append results to a CSV file for easy analysis in Excel/Pandas:
+4. Saving Results to CSV / TSV / JSON
+   Append results to a CSV file (default semicolon-separated for backward compatibility):
      $ count-fasta-rs -c results.csv -d ./genomes
-   (Note: If 'results.csv' exists, new rows are appended. If not, it's created with a header.)
+   Output standard RFC 4180 comma-separated CSV:
+     $ count-fasta-rs -c results.csv --comma -d ./genomes
+   Export to TSV or JSON:
+     $ count-fasta-rs --tsv results.tsv --json results.json genome.fna
+   Include extended assembly metrics (N25, N75, N90, L25, L50, L75, L90):
+     $ count-fasta-rs -e -c results.csv --comma genome.fna
 
 5. Performance Tuning
    - Threads: By default, it uses all available cores. Limit this with -t:
@@ -72,6 +77,17 @@ struct Args {
     /// If it exists, new results will be appended.
     #[clap(short, long, value_hint = clap::ValueHint::FilePath)]
     csv: Option<String>,
+
+    /// Path to the TSV file to be created or appended to.
+    ///
+    /// If the file does not exist, it will be created with a header.
+    /// If it exists, new results will be appended.
+    #[clap(long, value_hint = clap::ValueHint::FilePath)]
+    tsv: Option<String>,
+
+    /// Path to the JSON file to write results to.
+    #[clap(long, value_hint = clap::ValueHint::FilePath)]
+    json: Option<String>,
 
     /// Directory to process (non-recursive).
     ///
@@ -99,11 +115,25 @@ struct Args {
     #[clap(name = "FASTA FILE", value_hint = clap::ValueHint::FilePath)]
     files: Vec<String>,
 
+    /// Minimum contig length threshold in bp.
+    ///
+    /// Contigs shorter than this length are excluded from assembly metrics.
+    #[clap(short = 'm', long = "min-length", default_value = "0")]
+    min_length: usize,
+
     /// Disable SIMD optimizations (force scalar fallback).
     ///
     /// Useful for debugging or if SIMD causes issues on specific hardware.
     #[clap(long)]
     no_simd: bool,
+
+    /// Include extended assembly metrics (N25, N75, N90, L25, L50, L75, L90).
+    #[clap(short = 'e', long = "extended")]
+    extended: bool,
+
+    /// Output CSV in RFC 4180 comma-separated format instead of default semicolon format.
+    #[clap(long)]
+    comma: bool,
 }
 
 fn main() {
@@ -116,28 +146,57 @@ fn main() {
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     let mut files_to_process = Vec::new();
+    let mut directory_error = false;
     for dir in args.directory {
         match get_fasta_files_from_directory(&dir) {
             Ok(files) => files_to_process.extend(files),
             Err(e) => {
                 eprintln!("Error reading directory '{}': {}", dir, e);
-                std::process::exit(1);
+                directory_error = true;
             }
         }
     }
     files_to_process.extend(args.files.into_iter().map(PathBuf::from));
 
-    let results = process_files(files_to_process, args.threads, args.no_simd);
+    if files_to_process.is_empty() && !directory_error {
+        files_to_process.push(PathBuf::from("-"));
+    }
 
-    if let Some(csv_file) = args.csv {
-        if let Err(e) = append_to_csv(&results, &csv_file) {
-            eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
-            std::process::exit(1);
+    let (results, processing_error) =
+        process_files(files_to_process, args.threads, args.no_simd, args.min_length);
+    let mut exit_error = directory_error || processing_error;
+
+    let has_file_output = args.csv.is_some() || args.tsv.is_some() || args.json.is_some();
+
+    if let Some(ref csv_file) = args.csv
+        && let Err(e) = append_to_csv(&results, csv_file, args.comma, args.extended)
+    {
+        eprintln!("Failed to write CSV file '{}': {}", csv_file, e);
+        exit_error = true;
+    }
+
+    if let Some(ref tsv_file) = args.tsv
+        && let Err(e) = append_to_tsv(&results, tsv_file, args.extended)
+    {
+        eprintln!("Failed to write TSV file '{}': {}", tsv_file, e);
+        exit_error = true;
+    }
+
+    if let Some(ref json_file) = args.json
+        && let Err(e) = write_to_json(&results, json_file, args.extended)
+    {
+        eprintln!("Failed to write JSON file '{}': {}", json_file, e);
+        exit_error = true;
+    }
+
+    if !has_file_output {
+        for result in &results {
+            print_results(result, args.legacy, args.extended);
         }
-    } else {
-        for result in results {
-            print_results(&result, args.legacy);
-        }
+    }
+
+    if exit_error {
+        std::process::exit(1);
     }
 }
 
@@ -159,26 +218,35 @@ fn process_files(
     files: Vec<PathBuf>,
     threads: Option<usize>,
     no_simd: bool,
-) -> Vec<process_files::AnalysisResults> {
+    min_length: usize,
+) -> (Vec<process_files::AnalysisResults>, bool) {
     let available_threads = determine_threads(Some(&files), threads);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(available_threads)
         .build()
         .unwrap();
-    pool.install(|| {
+    let had_error = std::sync::atomic::AtomicBool::new(false);
+    let results: Vec<process_files::AnalysisResults> = pool.install(|| {
         files
             .par_iter()
             .flat_map(
-                |file| match process_files::process_any_file(file, no_simd) {
-                    Ok(v) => v,
+                |file| match process_files::process_any_file(file, no_simd, min_length) {
+                    Ok((v, member_err)) => {
+                        if member_err {
+                            had_error.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        v
+                    }
                     Err(e) => {
                         eprintln!("Error processing file {:?}: {}", file, e);
+                        had_error.store(true, std::sync::atomic::Ordering::Relaxed);
                         Vec::new()
                     }
                 },
             )
             .collect()
-    })
+    });
+    (results, had_error.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn determine_threads(files: Option<&[PathBuf]>, threads: Option<usize>) -> usize {
@@ -195,7 +263,7 @@ fn determine_threads(files: Option<&[PathBuf]>, threads: Option<usize>) -> usize
     available_threads
 }
 
-fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
+fn print_results(results: &process_files::AnalysisResults, legacy: bool, extended: bool) {
     if !legacy {
         println!("\nFile name:\t{} ", results.filename);
     } else {
@@ -209,19 +277,32 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
         .unwrap_or(0);
     println!("Average contig length is:\t{} bp", avg_len);
     println!("Largest contig:\t\t{} bp", results.largest_contig);
-    println!("Shortest contig:\t\t{} bp", results.shortest_contig);
-    println!(
-        "N25 stats:\t\t\t25% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n25_sequence_count, results.n25
-    );
+    let shortest = if results.shortest_contig == usize::MAX {
+        0
+    } else {
+        results.shortest_contig
+    };
+    println!("Shortest contig:\t\t{} bp", shortest);
+    if extended {
+        println!(
+            "N25 stats:\t\t\t25% of total sequence length is contained in the {} sequences >= {} bp",
+            results.l25, results.n25
+        );
+    }
     println!(
         "N50 stats:\t\t\t50% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n50_sequence_count, results.n50
+        results.l50, results.n50
     );
-    println!(
-        "N75 stats:\t\t\t75% of total sequence length is contained in the {} sequences >= {} bp",
-        results.n75_sequence_count, results.n75
-    );
+    if extended {
+        println!(
+            "N75 stats:\t\t\t75% of total sequence length is contained in the {} sequences >= {} bp",
+            results.l75, results.n75
+        );
+        println!(
+            "N90 stats:\t\t\t90% of total sequence length is contained in the {} sequences >= {} bp",
+            results.l90, results.n90
+        );
+    }
     println!("Total GC count:\t\t\t{} bp", results.gc_count);
     println!(
         "GC %:\t\t\t\t{:.2} %",
@@ -234,7 +315,157 @@ fn print_results(results: &process_files::AnalysisResults, legacy: bool) {
     );
 }
 
-fn append_to_csv(results: &[process_files::AnalysisResults], csv_filename: &str) -> io::Result<()> {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssemblyReport {
+    pub filename: String,
+    pub total_length: usize,
+    pub sequence_count: usize,
+    pub average_length: usize,
+    pub largest_contig: usize,
+    pub shortest_contig: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n25: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l25: Option<usize>,
+    pub n50: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l50: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n75: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l75: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n90: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l90: Option<usize>,
+    pub gc_count: usize,
+    pub gc_pct: f64,
+    pub n_count: usize,
+    pub n_pct: f64,
+}
+
+impl AssemblyReport {
+    pub fn from_analysis(result: &process_files::AnalysisResults, extended: bool) -> Self {
+        let average_length = if result.sequence_count > 0 {
+            (result.total_length as f64 / result.sequence_count as f64).round() as usize
+        } else {
+            0
+        };
+        let gc_pct = if result.total_length > 0 {
+            ((result.gc_count as f64 / result.total_length as f64) * 10000.0).round() / 100.0
+        } else {
+            0.0
+        };
+        let n_pct = if result.total_length > 0 {
+            ((result.n_count as f64 / result.total_length as f64) * 10000.0).round() / 100.0
+        } else {
+            0.0
+        };
+
+        let shortest_contig = if result.shortest_contig == usize::MAX {
+            0
+        } else {
+            result.shortest_contig
+        };
+
+        Self {
+            filename: result.filename.clone(),
+            total_length: result.total_length,
+            sequence_count: result.sequence_count,
+            average_length,
+            largest_contig: result.largest_contig,
+            shortest_contig,
+            n25: if extended { Some(result.n25) } else { None },
+            l25: if extended { Some(result.l25) } else { None },
+            n50: result.n50,
+            l50: if extended { Some(result.l50) } else { None },
+            n75: if extended { Some(result.n75) } else { None },
+            l75: if extended { Some(result.l75) } else { None },
+            n90: if extended { Some(result.n90) } else { None },
+            l90: if extended { Some(result.l90) } else { None },
+            gc_count: result.gc_count,
+            gc_pct,
+            n_count: result.n_count,
+            n_pct,
+        }
+    }
+}
+
+fn escape_csv(val: &str) -> String {
+    if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+        format!("\"{}\"", val.replace('"', "\"\""))
+    } else {
+        val.to_string()
+    }
+}
+
+fn write_delimited_records<W: Write>(
+    mut writer: W,
+    results: &[process_files::AnalysisResults],
+    delimiter: &str,
+    extended: bool,
+    escape_csv_names: bool,
+) -> io::Result<()> {
+    for result in results {
+        let report = AssemblyReport::from_analysis(result, extended);
+        let fname = if escape_csv_names {
+            escape_csv(&report.filename)
+        } else {
+            report.filename.clone()
+        };
+
+        if !extended {
+            writeln!(
+                writer,
+                "{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{:.2}{d}{}{d}{:.2}",
+                fname,
+                report.total_length,
+                report.sequence_count,
+                report.average_length,
+                report.largest_contig,
+                report.shortest_contig,
+                report.n50,
+                report.gc_count,
+                report.gc_pct,
+                report.n_count,
+                report.n_pct,
+                d = delimiter,
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{}{d}{:.2}{d}{}{d}{:.2}",
+                fname,
+                report.total_length,
+                report.sequence_count,
+                report.average_length,
+                report.largest_contig,
+                report.shortest_contig,
+                report.n25.unwrap_or(0),
+                report.l25.unwrap_or(0),
+                report.n50,
+                report.l50.unwrap_or(0),
+                report.n75.unwrap_or(0),
+                report.l75.unwrap_or(0),
+                report.n90.unwrap_or(0),
+                report.l90.unwrap_or(0),
+                report.gc_count,
+                report.gc_pct,
+                report.n_count,
+                report.n_pct,
+                d = delimiter,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn append_to_csv(
+    results: &[process_files::AnalysisResults],
+    csv_filename: &str,
+    comma: bool,
+    extended: bool,
+) -> io::Result<()> {
     let csv_exists = Path::new(csv_filename).exists();
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -243,43 +474,139 @@ fn append_to_csv(results: &[process_files::AnalysisResults], csv_filename: &str)
     let mut writer = std::io::BufWriter::new(file);
 
     if !csv_exists {
-        let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
-        writer.write_all(header.as_bytes())?;
+        if !comma {
+            if !extended {
+                let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N50;GC_percentage;total_N;N_percentage\n";
+                writer.write_all(header.as_bytes())?;
+            } else {
+                let header = "filename;assembly_length;number_of_sequences;average_length;largest_contig;shortest_contig;N25;L25;N50;L50;N75;L75;N90;L90;GC_percentage;total_N;N_percentage\n";
+                writer.write_all(header.as_bytes())?;
+            }
+        } else if !extended {
+            let header = "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n50,gc_count,gc_pct,n_count,n_pct\n";
+            writer.write_all(header.as_bytes())?;
+        } else {
+            let header = "filename,total_length,sequence_count,average_length,largest_contig,shortest_contig,n25,l25,n50,l50,n75,l75,n90,l90,gc_count,gc_pct,n_count,n_pct\n";
+            writer.write_all(header.as_bytes())?;
+        }
     }
 
-    for result in results {
-        let avg_len = if result.sequence_count > 0 {
-            (result.total_length as f64 / result.sequence_count as f64).round() as usize
-        } else {
-            0
-        };
-        let gc_pct = if result.total_length > 0 {
-            (result.gc_count as f64 / result.total_length as f64) * 100.0
-        } else {
-            0.0
-        };
-        let n_pct = if result.total_length > 0 {
-            (result.n_count as f64 / result.total_length as f64) * 100.0
-        } else {
-            0.0
-        };
+    if !comma {
+        for result in results {
+            let avg_len = if result.sequence_count > 0 {
+                (result.total_length as f64 / result.sequence_count as f64).round() as usize
+            } else {
+                0
+            };
+            let gc_pct = if result.total_length > 0 {
+                (result.gc_count as f64 / result.total_length as f64) * 100.0
+            } else {
+                0.0
+            };
+            let n_pct = if result.total_length > 0 {
+                (result.n_count as f64 / result.total_length as f64) * 100.0
+            } else {
+                0.0
+            };
 
-        writeln!(
-            writer,
-            "{};{};{};{};{};{};{};{:.7};{};{:.7}",
-            result.filename,
-            result.total_length,
-            result.sequence_count,
-            avg_len,
-            result.largest_contig,
-            result.shortest_contig,
-            result.n50,
-            gc_pct,
-            result.n_count,
-            n_pct,
-        )?;
+            if !extended {
+                writeln!(
+                    writer,
+                    "{};{};{};{};{};{};{};{:.7};{};{:.7}",
+                    result.filename,
+                    result.total_length,
+                    result.sequence_count,
+                    avg_len,
+                    result.largest_contig,
+                    result.shortest_contig,
+                    result.n50,
+                    gc_pct,
+                    result.n_count,
+                    n_pct,
+                )?;
+            } else {
+                writeln!(
+                    writer,
+                    "{};{};{};{};{};{};{};{};{};{};{};{};{};{};{:.7};{};{:.7}",
+                    result.filename,
+                    result.total_length,
+                    result.sequence_count,
+                    avg_len,
+                    result.largest_contig,
+                    result.shortest_contig,
+                    result.n25,
+                    result.l25,
+                    result.n50,
+                    result.l50,
+                    result.n75,
+                    result.l75,
+                    result.n90,
+                    result.l90,
+                    gc_pct,
+                    result.n_count,
+                    n_pct,
+                )?;
+            }
+        }
+    } else {
+        write_delimited_records(&mut writer, results, ",", extended, true)?;
     }
 
+    writer.flush()?;
+    Ok(())
+}
+
+fn append_to_tsv(
+    results: &[process_files::AnalysisResults],
+    tsv_filename: &str,
+    extended: bool,
+) -> io::Result<()> {
+    let tsv_exists = Path::new(tsv_filename).exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(tsv_filename)?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    if !tsv_exists {
+        if !extended {
+            let header = "filename\ttotal_length\tsequence_count\taverage_length\tlargest_contig\tshortest_contig\tn50\tgc_count\tgc_pct\tn_count\tn_pct\n";
+            writer.write_all(header.as_bytes())?;
+        } else {
+            let header = "filename\ttotal_length\tsequence_count\taverage_length\tlargest_contig\tshortest_contig\tn25\tl25\tn50\tl50\tn75\tl75\tn90\tl90\tgc_count\tgc_pct\tn_count\tn_pct\n";
+            writer.write_all(header.as_bytes())?;
+        }
+    }
+
+    write_delimited_records(&mut writer, results, "\t", extended, false)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_to_json(
+    results: &[process_files::AnalysisResults],
+    json_filename: &str,
+    extended: bool,
+) -> io::Result<()> {
+    let mut reports: Vec<AssemblyReport> = if Path::new(json_filename).exists() {
+        if let Ok(file) = std::fs::File::open(json_filename) {
+            serde_json::from_reader(file).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    reports.extend(results.iter().map(|r| AssemblyReport::from_analysis(r, extended)));
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(json_filename)?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, &reports)
+        .map_err(io::Error::other)?;
     writer.flush()?;
     Ok(())
 }
@@ -294,18 +621,18 @@ mod tests {
     fn it_works() {
         let mut files_to_process = Vec::new();
 
-        if let Ok(files) = get_fasta_files_from_directory(&"./test/") {
+        if let Ok(files) = get_fasta_files_from_directory("./test/") {
             files_to_process.extend(files);
         }
 
-        let results = process_files(files_to_process, None, false);
+        let (results, _) = process_files(files_to_process, None, false, 0);
 
         let csv_file = "test/attempt.csv";
         if Path::new(csv_file).exists() {
             let _ = fs::remove_file(csv_file);
         }
 
-        append_to_csv(&results, &csv_file).expect("Failed to write CSV");
+        append_to_csv(&results, csv_file, false, false).expect("Failed to write CSV");
         let mut thing: Vec<String> = fs::read_to_string("test/test.csv")
             .unwrap()
             .lines()

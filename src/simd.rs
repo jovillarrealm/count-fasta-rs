@@ -1,4 +1,5 @@
-use wide::*;
+use fearless_simd::{dispatch, Level, Simd, SimdBase, SimdMask};
+use fearless_simd_macros::simd;
 
 const LOOKUP: [u8; 256] = {
     let mut table = [0u8; 256];
@@ -32,7 +33,8 @@ pub fn update_stats(line: &[u8], no_simd: bool) -> (usize, usize, usize) {
         return update_stats_scalar(line);
     }
 
-    update_stats_simd(line)
+    let level = Level::new();
+    dispatch!(level, simd => update_stats_simd_kernel(simd, line))
 }
 
 fn update_stats_scalar(line: &[u8]) -> (usize, usize, usize) {
@@ -48,61 +50,53 @@ fn update_stats_scalar(line: &[u8]) -> (usize, usize, usize) {
     (gc, n, seq_chars)
 }
 
-fn update_stats_simd(line: &[u8]) -> (usize, usize, usize) {
+#[simd]
+fn update_stats_simd_kernel<S: Simd>(
+    simd: S,
+    line: &[u8],
+) -> (usize, usize, usize) {
     let mut gc_total = 0;
     let mut n_total = 0;
     let mut seq_chars_total = 0;
 
-    let mut chunks = line.chunks_exact(32);
+    let len = S::u8s::LEN;
+    let mut chunks = line.chunks_exact(len);
 
-    let v_case_mask = u8x32::splat(0x20);
-    let v_g = u8x32::splat(b'g');
-    let v_c = u8x32::splat(b'c');
-    let v_n = u8x32::splat(b'n');
-    
-    let v_space = u8x32::splat(b' ');
-    let v_tab = u8x32::splat(b'\t');
-    let v_nl = u8x32::splat(b'\n');
-    let v_cr = u8x32::splat(b'\r');
-    let v_dash = u8x32::splat(b'-');
-    let v_dot = u8x32::splat(b'.');
+    let v_case_mask = S::u8s::splat(simd, 0x20);
+    let v_g = S::u8s::splat(simd, b'g');
+    let v_c = S::u8s::splat(simd, b'c');
+    let v_n = S::u8s::splat(simd, b'n');
+
+    let v_space = S::u8s::splat(simd, b' ');
+    let v_tab = S::u8s::splat(simd, b'\t');
+    let v_nl = S::u8s::splat(simd, b'\n');
+    let v_cr = S::u8s::splat(simd, b'\r');
+    let v_dash = S::u8s::splat(simd, b'-');
+    let v_dot = S::u8s::splat(simd, b'.');
 
     for chunk in chunks.by_ref() {
-        let chunk_arr: [u8; 32] = chunk.try_into().unwrap();
-        let v_chunk = u8x32::from(chunk_arr);
+        let v_chunk = S::u8s::from_slice(simd, chunk);
         let v = v_chunk | v_case_mask;
-        
-        let is_g = v.simd_eq(v_g);
-        let is_c = v.simd_eq(v_c);
-        let is_n = v.simd_eq(v_n);
-        
-        let is_gc = is_g | is_c;
-        let signed_gc: i8x32 = bytemuck::cast(is_gc);
-        let signed_n: i8x32 = bytemuck::cast(is_n);
-        gc_total += signed_gc.to_bitmask().count_ones() as usize;
-        n_total += signed_n.to_bitmask().count_ones() as usize;
 
-        // Count skipped
-        let s1 = v_chunk.simd_eq(v_space);
-        let s2 = v_chunk.simd_eq(v_tab);
-        let s3 = v_chunk.simd_eq(v_nl);
-        let s4 = v_chunk.simd_eq(v_cr);
-        let s5 = v_chunk.simd_eq(v_dash);
-        let s6 = v_chunk.simd_eq(v_dot);
-        
-        let is_skipped = s1 | s2 | s3 | s4 | s5 | s6;
-        let signed_skipped: i8x32 = bytemuck::cast(is_skipped);
-        let skipped_count = signed_skipped.to_bitmask().count_ones() as usize;
-        seq_chars_total += 32 - skipped_count;
+        let is_gc = v.simd_eq(v_g) | v.simd_eq(v_c);
+        let is_n = v.simd_eq(v_n);
+
+        gc_total += is_gc.to_bitmask().count_ones() as usize;
+        n_total += is_n.to_bitmask().count_ones() as usize;
+
+        let is_skipped = v_chunk.simd_eq(v_space)
+            | v_chunk.simd_eq(v_tab)
+            | v_chunk.simd_eq(v_nl)
+            | v_chunk.simd_eq(v_cr)
+            | v_chunk.simd_eq(v_dash)
+            | v_chunk.simd_eq(v_dot);
+
+        let skipped_count = is_skipped.to_bitmask().count_ones() as usize;
+        seq_chars_total += len - skipped_count;
     }
 
-    // Process tail
     let (gc, n, sc) = update_stats_scalar(chunks.remainder());
-    gc_total += gc;
-    n_total += n;
-    seq_chars_total += sc;
-
-    (gc_total, n_total, seq_chars_total)
+    (gc_total + gc, n_total + n, seq_chars_total + sc)
 }
 
 #[cfg(test)]
